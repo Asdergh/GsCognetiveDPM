@@ -102,9 +102,13 @@ class GaussianModel:
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
 
+    # @property
+    # def get_scaling(self):
+    #     return self.scaling_activation(self._scaling)
+    
     @property
     def get_scaling(self):
-        return self.scaling_activation(self._scaling)
+        return torch.clamp(self._scaling, 1e-5, 1.0)
     
     @property
     def get_rotation(self):
@@ -155,7 +159,9 @@ class GaussianModel:
         self.viewmats = pcd_attrs["viewmats"].to(self.device)
         self.Ks = pcd_attrs["Ks"].to(self.device)
         self.cameras_extent = pcd_attrs["cameras_extent"].to(self.device)
-        print(f"Scence Extent: {self.cameras_extent}")
+        print(pcd_attrs["normals"].min(), pcd_attrs["normals"].mean(), pcd_attrs["normals"].max(), pcd_attrs["normals"].shape)
+        print(pcd_attrs["colors"].shape)
+        # print(f"Scence Extent: {self.cameras_extent}")
 
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.Tensor(np.asarray(pcd_attrs["pts"])).to(self.device)
@@ -168,7 +174,13 @@ class GaussianModel:
 
         # dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).to(self.device)), 0.0000001)
         # scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
-        scales = torch.Tensor(pcd_attrs["initial_scales"]).to(self.device)
+        if pcd_attrs["initial_scales"] is not None:
+            scales = torch.Tensor(pcd_attrs["initial_scales"]).to(self.device)
+        
+        else:
+            scales = torch.rand_like(fused_point_cloud).to(self.device)
+            print(f"SCALES INITIALIZED RANDOMLY!!: {scales.size()}")
+
         print(f"INITIAL SCALES SIZE: {scales.min()}, {scales.mean()}, {scales.max()}")
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
@@ -250,7 +262,7 @@ class GaussianModel:
         return l
 
     def save_ply(self, path):
-        mkdir_p(os.path.dirname(path))
+        # mkdir_p(os.path.dirname(path))
 
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
@@ -429,8 +441,10 @@ class GaussianModel:
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
-        means =torch.zeros((stds.size(0), 3),device="cuda")
-        samples = torch.normal(mean=means, std=stds)
+        means = torch.zeros((stds.size(0), 3),device="cuda")
+        print(stds.size(), torch.where(stds < 0.0, True, False).sum())
+        print(means.size(), torch.where(means == 0.0, True, False).sum())
+        samples = torch.normal(mean=(means + 1e-4), std=(torch.abs(stds) + 1e-4))
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
@@ -463,7 +477,7 @@ class GaussianModel:
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
-        grads = self.xyz_gradient_accum / self.denom
+        grads = self.xyz_gradient_accum / (self.denom + 1e-8)
         grads[grads.isnan()] = 0.0
 
         self.tmp_radii = radii

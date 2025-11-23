@@ -95,9 +95,6 @@ class CrossAttention(nn.Module):
 
         return attention
         
-        
-        
-
 class Block(nn.Module):
 
     def __init__(
@@ -106,7 +103,7 @@ class Block(nn.Module):
         hiden_features: Optional[int]=None,
         out_features: Optional[int]=None,
         activation_fn: Optional[str]="softmax",
-        apply_film: Optional[bool]=False,
+        apply_film: Optional[bool]=True,
         film_activation_fn: Optional[str]="sigmoid",
         depth_level: Optional[int]=6
     ) -> None:
@@ -126,15 +123,9 @@ class Block(nn.Module):
         self.weights_fn = lambda dt: F.softmax(torch.exp(torch.tensor(dt * 0.1)), dim=-1)
         self.blocks_ = nn.ModuleList([
             Mlp(
-                in_features=next(val for (val, cond) in [
-                    (in_features, idx == 0),
-                    (self.hiden_features, idx != 0)
-                ] if cond),
+                in_features=(in_features if idx == 0 else self.hiden_features),
                 hiden_features=hiden_features,
-                out_features=next(val for (val, cond) in [
-                    (self.hiden_features, idx != (depth_level - 1)),
-                    (self.out_features, idx == (depth_level - 1))
-                ] if cond),
+                out_features=(out_features if idx == (depth_level - 1) else self.hiden_features),
                 activation_fn=activation_fn
             ) for idx in range(self.d_max)
         ])
@@ -174,7 +165,7 @@ if __name__ == "__main__":
     print(images_test.size())
     block = Block(
         in_features=32,
-        hiden_features=64,
+        hiden_features=None,
         out_features=128,
         apply_film=True,
         depth_level=12

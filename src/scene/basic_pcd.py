@@ -129,7 +129,8 @@ class BasicPointCloudScene:
         max_radii: Optional[float]=None,
         inv_poses: Optional[float]=False,
         olr_radii: Optional[float]=0.32,
-        olr_nbhs: Optional[float]=12
+        olr_nbhs: Optional[float]=12,
+        factor: Optional[float]=1.0
     ) -> None:
 
         imgs_path, points_f, cams, K, scale = self._parse_colmap_path(path)
@@ -238,7 +239,7 @@ class BasicPointCloudScene:
         if scale is not None:
             points_ *= scale
 
-        pcd.points = vec(points_)
+        pcd.points = vec(points_ * factor)
         pcd.colors = vec(colors_)
 
         # print(points_[np.linalg.norm(points_, axis=-1) == 0].shape, points_.shape)
@@ -251,14 +252,11 @@ class BasicPointCloudScene:
             txyzs, quats, 
             inv=inv_poses
         )
+        self.viewmats[..., :3, -1] *= factor
         
 
     def save_ply(self, path: str) -> None:
-        
-        if not os.path.exists(path):
-            os.mkdir(path)
-            pcd_f = os.path.join(path, f"pcd_formar_scene.ply")
-            write_point_cloud(pcd_f, self.pcd)
+        write_point_cloud(path, self.pcd)
             
         
     def show(self) -> None:
@@ -267,7 +265,7 @@ class BasicPointCloudScene:
         rr.init(path, spawn=True)
         
         pcd_path = f"{path}/Scene"
-        scene_items = self.get_items()
+        scene_items = self.attributes
         print(scene_items["colors"].shape, scene_items["colors"].min(), scene_items["colors"].mean(), scene_items["colors"].max())
         # print(scene_items["colors"].min(), scene_items["colors"].max())
         rr.log(
@@ -334,20 +332,33 @@ class BasicPointCloudScene:
         self.nn_searcher.fit(pts)
 
         dists, _ = self.nn_searcher.kneighbors(pts)
-        dists = np.log(np.sqrt(dists.min(axis=-1)) + 1e-14)
-        print(dists.shape, dists.min(), dists.mean(), dists.max())
-        initial_scales = 0.7 * np.abs(np.stack([dists, dists, dists], axis=-1))
-
-        central_camera_t = self.viewmats[..., :3, -1].mean(dim=0).unsqueeze(dim=0)
-        cameras_central_dist = torch.norm(central_camera_t - self.viewmats[..., :3, -1], dim=-1)
-        cameras_extent = torch.max(cameras_central_dist)
-        
+        # print(dists.shape)
+        # print(dists.min(), dists.mean(), dists.max())
+        dists = np.exp(np.log(np.sqrt(dists.min(axis=-1)) + 1e-8))
+        # print(dists.shape, dists.min(), dists.mean(), dists.max())
+        # print(np.exp(dists).min(), np.exp(dists).mean(), np.exp(dists).max())
+        initial_scales = np.abs(np.stack([dists, dists, dists], axis=-1))
+        # print(f"INITIAL SCALES: {initial_scales.shape}, {initial_scales.min()}, {initial_scales.mean()}, {initial_scales.max()}")
+        # central_camera_t = self.viewmats[..., :3, -1].mean(dim=0).unsqueeze(dim=0)
+        # cameras_central_dist = torch.norm(central_camera_t - self.viewmats[..., :3, -1], dim=-1)
+        # cameras_extent = torch.max(cameras_central_dist)
+        cam_dists = torch.norm(self.viewmats[..., :3, -1], dim=1)
+        max_cam = self.viewmats[torch.argmax(cam_dists), :3, -1]
+        min_cam = self.viewmats[torch.argmin(cam_dists), :3, -1]
+        cameras_dists_idx = torch.argsort(torch.norm(self.viewmats[..., :3, -1], dim=-1))
+        top_10 = self.viewmats[cameras_dists_idx[:10], :3, -1]
+        # print(top_10)
+        # print(max_cam.size(), min_cam.size())
+        cameras_extent = torch.norm(max_cam - min_cam)
+        print(f"NEW CAMERAS EXTENT: {cameras_extent}")
+        print(f"BBOX EXTENT: {np.asarray(bbox.extent)}")
+        print(f"BBOX CENTER: {np.asarray(bbox.center)}")
         return {
             "pts": pts,
-            "initial_scales": initial_scales,
+            "initial_scales": None,
             "colors": (np.asarray(self.pcd.colors) / 255.0).astype(np.float32),
             "normals": np.asarray(self.pcd.normals),
-            "cameras_extent": None,
+            "cameras_extent": cameras_extent,
             "bbox_center": (
                 np.asarray(bbox.center)
                 if bbox is not None
@@ -380,19 +391,15 @@ if __name__ == "__main__":
         [0.0, 200.0, 64.0],
         [0.0, 0.0, 1.0]
     ])
-    pcd = BasicPointCloudScene(base_K=K)
+    pcd = BasicPointCloudScene()
     # pcd.create_from_video([video3], 5.0)
     pcd.create_from_colmap(
-        path="/media/test/T7/ply_collection/gerrard-hall",
-        partition_size=1000,
-        partitions_n=40,
-        shuffle=True,
-        max_radii=28.5,
-        inv_poses=True,
-        axis_correction_dir=None
+        "/media/ram/T7/ply_collection/gerrard-hall", 
+        partition_size=100, 
+        partitions_n=1, 
+        factor=60.0,
     )
-    print(pcd.K)
-    pcd.save_ply("/media/test/T7/ply_collection")
+    pcd.save_ply("/media/test/T7/ply_collection/dummy_test.ply")
     pcd.show()
 
     
