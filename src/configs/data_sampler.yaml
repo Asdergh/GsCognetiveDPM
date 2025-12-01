@@ -1,0 +1,35 @@
+data_sampler:
+  train:
+    name: mip-nerf
+    batch_size: 32
+    shuffle: false
+    params:
+      path: /home/ram/Downloads/360_v2
+      target_size:
+      - 112
+      - 224
+      scene_type: counter
+      images_scale: 1
+      pts_partition_size: 10000
+      pts_partitions_n: 10
+      pts_shuffle: false
+      pts_scale: 3e+1
+      normal_knn: 30
+      normal_radii: 0.1
+  validation:
+    name: mip-nerf
+    batch_size: 32
+    shuffle: false
+    params:
+      path: /home/ram/Downloads/360_v2
+      target_size:
+      - 112
+      - 224
+      scene_type: counter
+      images_scale: 1
+      pts_partition_size: 10000
+      pts_partitions_n: 5
+      pts_shuffle: true
+      pts_scale: 3e+1
+      normal_knn: 30
+      normal_radii: 0.1

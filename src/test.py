@@ -1,276 +1,183 @@
 import torch 
 import torch.nn as nn
-from typing import (Optional, Tuple, List)
-from tqdm import tqdm
-from gsplat import rasterization
-from gsplat.utils import save_ply
-from torch.optim import (Adam, Optimizer)
-from torch.utils.tensorboard import SummaryWriter
-from .models.layers import get_activation
-from .utils.metrics import ssim
-from .utils.sh_utils import eval_sh
-from .configs import GsOptimizerConfig
-from .scene.basic_pcd import BasicPointCloudScene
-from .scene.gaussian_model import GaussianModel
-from torchvision.utils import make_grid
-from random import choice, randint
-import matplotlib.cm as cm
+import lightning as l
+import os
+import torch.nn.functional as F
+from torchvision.datasets import MNIST
+from typing import (Optional, Tuple, Union)
+from .models.layers import get_activation, Mlp
+from torch.utils.data import DataLoader
+from torchvision.transforms import (Compose, Resize, Lambda, PILToTensor)
+from sklearn.metrics import (
+    accuracy_score,
+    recall_score,
+    precision_score
+)
+from lightning.pytorch.callbacks import (ModelCheckpoint, EarlyStopping)
+from torch.optim import (Optimizer, Adam)
 
 
 
-class SimpleTrainer:
-
-    def __init__(
-        self,
-        colmap_path: str,
-        resolution: Optional[Tuple[int, int]]=(224, 224),
-        opt: Optional[GsOptimizerConfig]=GsOptimizerConfig(),
-        device: Optional[str]="cuda",
-        log_dir: Optional[str]="runs",
-        alpha: Optional[float]=0.08,
-        beta: Optional[float]=0.2,
-        sh_degree: Optional[int]=3,
-        checkpoint_steps: Optional[List]=[0, 100, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 9999],
-        samples_to_log: Optional[int]=2,
-        partiotion_size: Optional[int]=40,
-        partitions_n: Optional[int]=1000,
-        dist_factor: Optional[float]=40.0
-    ):
-        
-        self.opt = opt
-        self.device = device
-        self.img_res = resolution
-        self.checkpoint_steps = checkpoint_steps
-        self.samples2log = samples_to_log
-
-        self.pcd = BasicPointCloudScene(width=self.img_res[0], height=self.img_res[1])
-        self.pcd.create_from_colmap(
-            colmap_path, 
-            partition_size=partiotion_size, 
-            partitions_n=partitions_n, 
-            factor=dist_factor,
-            inv_poses=True
-        )
-        # self.pcd.show()
-       
-        self.N = self.pcd.gt_imgs.size(0)
-        print(f"NUMBER OF VIEWS: {self.N}")
-        self.cams_ids = [idx for idx in range(self.N)]
-        print(len(self.cams_ids))
-        self.cams_ids_buffer = []
-
-        self.gt_imgs = self.pcd.gt_imgs.to(self.device)
-        # self.pcd.show()
-        self.gaussians = GaussianModel(sh_degree=sh_degree, device=self.device)
-        self.gaussians.create_from_pcd(self.pcd, 1)
-        self.gaussians.training_setup(opt)
-
-        self.epochs = opt.iterations
-        self.device = device
-        self.sh_degree = sh_degree
-
-        self.loss_fn = nn.L1Loss()
-        self.alpha = torch.tensor(alpha).to(self.device)
-        self.beta = torch.tensor(beta).to(self.device)
-
-        self.writer = SummaryWriter(log_dir)
-        # self.noise = self._check_device(torch.normal(0, 1, (gs_points, noise_dim)))
-        
-
-    def train(self) -> torch.Tensor:        
-        with tqdm(
-            desc="SimpleGSTrainer",
-            total=self.epochs,
-            ascii=":>",
-            colour="green"
-        ) as pbar:
-            losses = []
-            for step in range(self.epochs):
-                
-                if not self.cams_ids:
-                    self.cams_ids = self.cams_ids_buffer
-                    self.cams_ids_buffer = []
-
-
-                idx = randint(0, len(self.cams_ids) - 1)
-                cam_idx = self.cams_ids.pop(idx)
-                
-                self.cams_ids_buffer.append(cam_idx)
-
-                viewmat = self.gaussians.viewmats[cam_idx, ...]
-                K = self.gaussians.Ks[cam_idx, ...]
-                gt_img = self.gt_imgs[cam_idx, ...]
-                            
-                xyz = self.gaussians.get_xyz
-                quats = self.gaussians.get_rotation
-                scales = self.gaussians.get_scaling
-                opacities = self.gaussians.get_opacity.squeeze()
-                # features_ds = self.gaussians.get_features_dc
-                # features_rest = self.gaussians.get_features_rest
-                features = self.gaussians.get_features
-
-                # cat_rgbsh = torch.cat([features_ds, features_rest], dim=1).transpose(1, 2)
-                dir_pp = (xyz - viewmat[:3, -1].unsqueeze(dim=0).repeat(xyz.size(0), 1))
-                dir_ppn = dir_pp / torch.norm(dir_pp, dim=-1, keepdim=True)
-                colors = eval_sh(self.sh_degree, features.transpose(-1, -2), dir_ppn)
-                
-                # print(f"""
-                # xyz: {xyz.dtype}, {xyz.is_cuda},
-                # quats: {quats.dtype}, {quats.is_cuda}
-                # scales: {scales.dtype}, {scales.is_cuda},
-                # opacities: {opacities.dtype}, {opacities.is_cuda}
-                # colors: {colors.dtype}, {colors.size()}, {colors.is_cuda},
-                # Ks: {self.gaussians.Ks.dtype}, {self.gaussians.Ks.size()}, {self.gaussians.Ks.is_cuda}
-                # viewmats: {self.gaussians.viewmats.dtype}, {self.gaussians.viewmats.size()}, {self.gaussians.viewmats.is_cuda}
-                # """)
-                rendered_rgb, alphas, meta = rasterization(
-                    means=xyz,
-                    quats=quats,
-                    scales=scales, 
-                    opacities=opacities,
-                    colors=colors,
-                    Ks=K[None], 
-                    viewmats=viewmat[None],
-                    width=self.img_res[0],
-                    height=self.img_res[1],
-                    packed=False
-                )
-                # print(self.gaussians.get_scaling.min(), self.gaussians.get_scaling.mean(), self.gaussians.get_scaling.max())
-                rendered_rgb = rendered_rgb.permute(0, -1, 1, 2)
-                # print(self.gt_imgs.size(), rendered_rgb.size(), alphas.size())
-                L1 = self.loss_fn(rendered_rgb, gt_img)
-                Dssim = 1.0 - ssim(rendered_rgb, gt_img, device=self.device)
-                loss = self.alpha * L1 + self.beta * Dssim
-                loss.backward()
-
-                losses.append(loss.item())
-                # idx_samples = torch.randint(0, self.gt_imgs.size()[0], (self.samples2log, ))
-                # print((torch.Tensor(cm.jet(alphas[0, ...].detach().cpu().squeeze(dim=-1))) / 255.0).size())
-                self.writer.add_scalar("img_loss", loss, step)
-                self.writer.add_scalar("L1_loss", L1, step)
-                self.writer.add_scalar("Dssim", Dssim, step)
-                self.writer.add_scalar("ScalesMean", self.gaussians.get_scaling.mean().detach(), step)
-                self.writer.add_scalar("OpactiesMean", self.gaussians.get_opacity.mean().detach(), step)
-                self.writer.add_scalar("FeaturesDCMean", self.gaussians.get_features_dc.mean().detach(), step)
-                self.writer.add_scalar("FeaturesRestMean", self.gaussians.get_features_rest.mean().detach(), step)
-                self.writer.add_image("rendered_img", rendered_rgb.squeeze(), step)
-                self.writer.add_image("rendered_alphas", torch.Tensor(cm.inferno(alphas.detach().cpu().squeeze()))[..., :-1].permute(-1, 0, 1), step)
-                self.writer.add_image("gt_img", gt_img.squeeze(), 0)
-                
-                radii = torch.max(torch.max(meta["radii"], dim=-1).values, dim=0).values
-                visibility_filter = (radii > 0.0)
-                with torch.no_grad():
-                    
-                    #densification
-                    if (step < self.opt.densify_until_iter):
-                        
-                        
-                        # print(radii.size())
-                        # print(self.gaussians.max_radii2D.size(), visibility_filter.size())
-                        self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], 
-                                                                                    radii[visibility_filter])
-                        self.gaussians.add_densification_stats(xyz, visibility_filter)
-
-                        if ((step > self.opt.densify_from_iter) and 
-                            (step % self.opt.densification_interval) == 0):
-                            size_trashhold = 20
-                            self.gaussians.densify_and_prune(
-                                self.opt.densify_grad_threshold, 0.005, 
-                                self.gaussians.cameras_extent, 
-                                size_trashhold,
-                                radii
-                            )
-                            print(f"Densification was applied |--> New Gaussians Size: {self.gaussians.get_xyz.size()}")
-                        
-                        # if (step % self.opt.densification_interval) == 0:
-                        #     self.gaussians.reset_opacity()
-                    
-                    #optimization step
-                    self.gaussians.exposure_optimizer.step()
-                    self.gaussians.exposure_optimizer.zero_grad(set_to_none=True)
-                    self.gaussians.optimizer.step()
-                    self.gaussians.optimizer.zero_grad(set_to_none=True)
-                    
-                    if (step in self.checkpoint_steps):
-                        # save_ply({
-                        #     "means": self.gaussians.get_xyz.detach().cpu(),
-                        #     "quats": self.gaussians.get_rotation.detach().cpu(),
-                        #     "scales":  self.gaussians.get_scaling.detach().cpu(),
-                        #     "opacities":  self.gaussians.get_opacity.squeeze().detach().cpu(),
-                        #     "sh0":  self.gaussians.get_features_dc.detach().cpu(),
-                        #     "shN":  self.gaussians.get_features_rest.detach().cpu()
-                        # }, f"result_on_{step}.ply")
-
-                        self.gaussians.save_ply(f"result_on_{step}.ply")
-                pbar.update(1)
-        
-        return torch.Tensor(losses)
-    
-    def _check_device(self, v):
-        if isinstance(v, nn.Module):
-            if next(v.parameters()).device.type != self.device:
-                v = v.to(self.device)
-
-        else:
-            if v.device.type != self.device:
-                v = v.to(self.device)
-        
-        return v
-
-                
-    
-class GsGeneration3D(nn.Module):
+#TODO research lightning module training configurations possibilities
+class SimpleModule(l.LightningModule):
 
     def __init__(
         self,
-        in_features: int,
-        sh_degree: Optional[int]=3,
-        geom_activation_fn: Optional[str]="relu",
-        colors_activation_fn: Optional[str]="sigmoid",
+        class_labels: int,
+        img_size: Optional[Tuple[int, int]]=(128, 256),
+        conv_heads: Optional[int]=3,
+        hconv_features: Optional[int]=32,
+        oconv_features: Optional[int]=32,
+        hdense_features: Optional[int]=32,
+        conv_act_fn: Optional[str]="tanh",
+        dense_act_fn: Optional[str]="relu"
     ) -> None:
         
         super().__init__()
-        self.sh_degree = sh_degree
-        self._means = self._get_layer(in_features, 3, geom_activation_fn)
-        self._quats = self._get_layer(in_features, 4, geom_activation_fn)
-        self._scales = self._get_layer(in_features, 3, geom_activation_fn)
-        self._colors = self._get_layer(in_features, 3, colors_activation_fn)
-        self._sh_features = self._get_layer(in_features, 3 * (sh_degree + 1) ** 2, colors_activation_fn)
-        self._opactities = self._get_layer(in_features, 1, colors_activation_fn)
-
-
-    def _get_layer(self, in_f, out_f, act) -> nn.Module:
-        return nn.Sequential(
-            nn.Linear(in_f, out_f),
-            get_activation(act),
-            # nn.LayerNorm(out_f)
+        self.class_labels = class_labels
+        embed_size = [int(size / (2 ** conv_heads)) for size in img_size]
+        self.CE_loss = nn.CrossEntropyLoss()
+        self.ConvBase = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(
+                    in_channels=(
+                        1 if idx == 0 
+                        else hconv_features if idx != 0 and idx != (conv_heads - 1) 
+                        else oconv_features 
+                    ),
+                    out_channels=(
+                        hconv_features if idx != (conv_heads - 1) 
+                        else oconv_features
+                    ),
+                    stride=2,
+                    padding=1,
+                    kernel_size=(3, 3)
+                ),
+                nn.BatchNorm2d(hconv_features if idx != (conv_heads - 1) else oconv_features),
+                get_activation(conv_act_fn)
+            )
+            for idx in range(conv_heads)
+        ])
+        self.DenseHead = nn.Sequential(
+            Mlp(
+                in_features=embed_size[0] * embed_size[1] * oconv_features,
+                hiden_features=hdense_features,
+                out_features=hdense_features,
+                activation_fn=dense_act_fn
+            ),
+            Mlp(hdense_features, out_features=class_labels, activation_fn=dense_act_fn)
         )
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        N, _ = x.size()
-        return {
-            "means": self._means(x),
-            "quats": self._quats(x),
-            "scales": self._scales(x),
-            "sh0": self._colors(x).unsqueeze(dim=-1),
-            "shN": self._sh_features(x).view(N, 3, (self.sh_degree + 1) ** 2),
-            "opacities": self._opactities(x).squeeze()
-        }
-    
 
+    def validation_step(self, batch, batch_idx=None):
+        with torch.no_grad():
+            x, y = batch
+            for layer in self.ConvBase:
+                x = layer(x)
+            
+            x = torch.flatten(x, start_dim=1)
+            logits = self.DenseHead(x)
+            loss = self.CE_loss(logits, y)
+            logits = torch.argmax(logits, dim=-1)
+
+            logits = logits.cpu()
+            y = y.cpu()
+            accuracy = accuracy_score(logits, y)
+            precision = precision_score(logits, y, average="weighted")
+            recall = recall_score(logits, y, average="weighted")
+
+            self.log("val/accuracy", accuracy)
+            self.log("val/precision", precision)
+            self.log("val/recall", recall)
+            self.log("val/loss", loss)
+    
+    def training_step(self, batch, batch_idx) -> float:
+        
+        x, y = batch[0]
+        for layer in self.ConvBase:
+            x = layer(x)
+
+        x = torch.flatten(x, start_dim=1)
+        logits = self.DenseHead(x)
+        loss = self.CE_loss(logits, y)
+        self.log("train/loss", loss)
+
+        return loss
+    
+    def configure_optimizers(self) -> Union[list, Optimizer]:
+        return Adam(params=[
+            {"params": self.ConvBase.parameters(), 
+            "name": "conv_base", 
+            "lr": 0.01},
+            {"params": self.DenseHead.parameters(), 
+            "naem": "dense_head", 
+            "lr": 0.1}
+        ])
+    
 
 
 if __name__ == "__main__":
 
-    from torchvision.transforms import (Compose, PILToTensor, Resize, Lambda)
-    from PIL import Image
+    EPOCHS = 10
+    EPOCHS_PER_VAL = 1
+    METRICS2MONITOR = "accuracy"
+    K_TOP_RESULTS = 3
+    LOSS_PATIENCE = 3
 
-    log_dir = "runs"
-    colmap_dir = "/media/ram/T7/ply_collection/gerrard-hall"
-    trainer = SimpleTrainer(
-        log_dir=log_dir,
-        colmap_path=colmap_dir,
-        partitions_n=1,
-        partiotion_size=100
+
+    base_path = "/home/ram/Desktop/own_projects/tmp/GsCognetiveDPM/meta"
+    root_dataset = os.path.join(base_path, "MNIST_data")
+    model_ckpts = os.path.join(base_path, "MODEL_ckpts")
+    if not os.path.exists(root_dataset):
+        os.mkdir(root_dataset)
+
+    img_size = (128, 256)
+    dataset = MNIST(
+        root=root_dataset,
+        train=True,
+        download=True,
+        transform=Compose([
+            PILToTensor(),
+            Resize(img_size),
+            Lambda(lambda img: (img / 255.0 if img.max() > 1 else img))
+        ])
     )
-    losses = trainer.train()
+    train_loader = DataLoader(
+        dataset=dataset,
+        batch_size=32,
+        shuffle=True
+    )
+    val_loader = DataLoader(
+        dataset=dataset,
+        batch_size=32,
+        shuffle=False
+    )
+    model = SimpleModule(class_labels=32)
+
+    trainer = l.Trainer(
+        max_epochs=EPOCHS,
+        check_val_every_n_epoch=EPOCHS_PER_VAL,
+        callbacks=[
+            ModelCheckpoint(
+                dirpath=model_ckpts,
+                filename="{epoch}-{accuracy:.2f}-{recall:.2f}",
+                monitor=f"val/{METRICS2MONITOR}",
+                save_top_k=K_TOP_RESULTS,   
+            ),
+            EarlyStopping(
+                monitor="train/loss",
+                check_on_train_epoch_end=False,
+                mode="min",
+                patience=LOSS_PATIENCE
+            )
+        ]
+    )
+    trainer.fit(
+        model=model,
+        train_dataloaders=[train_loader],
+        val_dataloaders=[val_loader]
+    )
+    
+
+
+        

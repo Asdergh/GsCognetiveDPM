@@ -1,0 +1,6 @@
+rerun-sdk
+matplotlib
+tensorboard
+lightning
+PyQt6
+omegaconf

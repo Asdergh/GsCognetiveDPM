@@ -1,0 +1,86 @@
+data_sampler:
+  train:
+    name: mip-nerf
+    batch_size: 32
+    shuffle: false
+    params:
+      path: /home/ram/Downloads/360_v2
+      target_size:
+      - 112
+      - 224
+      scene_type: counter
+      images_scale: 1
+      pts_partition_size: 10000
+      pts_partitions_n: 10
+      pts_shuffle: false
+      pts_scale: 3e+1
+      normal_knn: 30
+      normal_radii: 0.1
+  validation:
+    name: mip-nerf
+    batch_size: 32
+    shuffle: false
+    params:
+      path: /home/ram/Downloads/360_v2
+      target_size:
+      - 112
+      - 224
+      scene_type: counter
+      images_scale: 1
+      pts_partition_size: 10000
+      pts_partitions_n: 5
+      pts_shuffle: true
+      pts_scale: 3e+1
+      normal_knn: 30
+      normal_radii: 0.1
+pipeline:
+  loging_path: /home/ram/Desktop/own_projects/tmp/GsCognetiveDPM/meta
+  sh_degree: 3
+  device: cuda
+  grad_trashold: 0.0002
+  size_trashold: 0.3
+  position_lr_init: 0.00016
+  position_lr_final: 1.6e-06
+  position_lr_delay_mult: 0.01
+  position_lr_max_steps: 30000.0
+  feature_lr: 0.0025
+  opacity_lr: 0.025
+  scaling_lr: 0.005
+  rotation_lr: 0.001
+  exposure_lr_init: 0.01
+  exposure_lr_final: 0.001
+  exposure_lr_delay_steps: 0.0
+  exposure_lr_delay_mult: 0.0
+  percent_dense: 0.01
+  opacity_reset_interval: 3000.0
+  depth_l1_weight_init: 1.0
+  depth_l1_weight_final: 0.01
+  random_background: false
+  optimizer_type: default
+  resolution:
+  - 112
+  - 224
+  features2log:
+  - renders
+  - splats
+  - splats-normal
+  log_from_step: 0
+  log_until_step: 10000
+  log_per_steps: 200
+  n_views2log: 2
+  steps2log: []
+  losses:
+  - d-ssim
+  - l1
+  - mse
+  - perceptive
+  metrics:
+  - ssim
+  background:
+  - 0.0
+  - 0.0
+  - 0.0
+  scaling_modifier: 1.0
+  densify_until_step: 10000
+  densify_from_step: 100
+  densification_interval: 500

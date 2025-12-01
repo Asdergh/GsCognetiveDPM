@@ -23,6 +23,8 @@ from ..utils.general_utils import (inverse_sigmoid, get_expon_lr_func, build_rot
 from ..utils.general_utils import (strip_symmetric, build_scaling_rotation)
 from .basic_pcd import BasicPointCloudScene
 from typing import Optional
+from typing import (Dict, Any)
+from dataclasses import dataclass, field
 
 # try:
 #     from diff_gaussian_rasterization import SparseGaussianAdam
@@ -30,6 +32,36 @@ from typing import Optional
 #     pass
 
 class GaussianModel:
+    @dataclass 
+    class Config:
+        #general for gaussian model
+        loging_path: str
+        sh_degree: Optional[int]=1
+        device: Optional[str]="cuda"
+
+        # optimization params
+        grad_trashold: Optional[float]=0.0002
+        size_trashold: Optional[float]=0.3
+        position_lr_init: Optional[float]=0.00016
+        position_lr_final: Optional[float]=1.6e-06
+        position_lr_delay_mult: Optional[float]=0.01
+        position_lr_max_steps: Optional[float]=30000.0
+        feature_lr: Optional[float]=0.0025
+        opacity_lr: Optional[float]=0.025
+        scaling_lr: Optional[float]=0.005
+        rotation_lr: Optional[float]=0.001
+        exposure_lr_init: Optional[float]=0.01
+        exposure_lr_final: Optional[float]=0.001
+        exposure_lr_delay_steps: Optional[float]=0
+        exposure_lr_delay_mult: Optional[float]=0.0
+        percent_dense: Optional[float]=0.01
+        opacity_reset_interval: Optional[float]=3000
+        depth_l1_weight_init: Optional[float]=1.0
+        depth_l1_weight_final: Optional[float]=0.01
+        random_background: Optional[bool]=False
+        optimizer_type: Optional[str]="default"
+    
+    cfg: Config
 
     def setup_functions(self):
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
@@ -49,11 +81,9 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree, optimizer_type="default", device: Optional[str]="cuda"):
-        self.device = device
-        self.active_sh_degree = 0
-        self.optimizer_type = optimizer_type
-        self.max_sh_degree = sh_degree  
+    def __init__(self):
+
+        self.max_sh_degree = self.cfg.sh_degree
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -63,10 +93,11 @@ class GaussianModel:
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
-        self.optimizer = None
+        self.gs_optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
+        # self.training_setup()
 
     def capture(self):
         return (
@@ -80,11 +111,11 @@ class GaussianModel:
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
-            self.optimizer.state_dict(),
+            self.gs_optimizer.state_dict(),
             self.spatial_lr_scale,
         )
     
-    def restore(self, model_args, training_args):
+    def restore(self, model_args):
         (self.active_sh_degree, 
         self._xyz, 
         self._features_dc, 
@@ -97,10 +128,10 @@ class GaussianModel:
         denom,
         opt_dict, 
         self.spatial_lr_scale) = model_args
-        self.training_setup(training_args)
+        self.training_setup()
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
-        self.optimizer.load_state_dict(opt_dict)
+        self.gs_optimizer.load_state_dict(opt_dict)
 
     # @property
     # def get_scaling(self):
@@ -153,19 +184,14 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_from_pcd(self, pcd : BasicPointCloudScene, spatial_lr_scale : float):
+    def create_from_pcd(self, initial_pkg: Dict[str, Any], spatial_lr_scale : float):
 
-        pcd_attrs = pcd.attributes
-        self.viewmats = pcd_attrs["viewmats"].to(self.device)
-        self.Ks = pcd_attrs["Ks"].to(self.device)
-        self.cameras_extent = pcd_attrs["cameras_extent"].to(self.device)
-        print(pcd_attrs["normals"].min(), pcd_attrs["normals"].mean(), pcd_attrs["normals"].max(), pcd_attrs["normals"].shape)
-        print(pcd_attrs["colors"].shape)
+        self.cameras_extent = initial_pkg["cameras_extent"].to(self.device)
         # print(f"Scence Extent: {self.cameras_extent}")
 
         self.spatial_lr_scale = spatial_lr_scale
-        fused_point_cloud = torch.Tensor(np.asarray(pcd_attrs["pts"])).to(self.device)
-        fused_color = RGB2SH(torch.Tensor(np.asarray(pcd_attrs["colors"])).to(self.device))
+        fused_point_cloud = torch.Tensor(np.asarray(initial_pkg["xyz"])).to(self.device)
+        fused_color = RGB2SH(torch.Tensor(np.asarray(initial_pkg["rgb"])).to(self.device))
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).to(self.device)
         features[:, :3, 0 ] = fused_color
         features[:, 3:, 1:] = 0.0
@@ -174,8 +200,8 @@ class GaussianModel:
 
         # dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).to(self.device)), 0.0000001)
         # scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
-        if pcd_attrs["initial_scales"] is not None:
-            scales = torch.Tensor(pcd_attrs["initial_scales"]).to(self.device)
+        if ("initial_scales" in initial_pkg) and (initial_pkg["initial_scales"] is not None):
+            scales = torch.Tensor(initial_pkg["initial_scales"]).to(self.device)
         
         else:
             scales = torch.rand_like(fused_point_cloud).to(self.device)
@@ -196,44 +222,45 @@ class GaussianModel:
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         # self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
         self.pretrained_exposures = None
-        exposure = torch.eye(3, 4, device="cuda")[None].repeat(pcd_attrs["gt_imgs"].size()[0], 1, 1)
+        exposure = torch.eye(3, 4, device="cuda")[None].repeat(initial_pkg["viewpointsN"], 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
 
-    def training_setup(self, training_args):
-        self.percent_dense = training_args.percent_dense
+    def training_setup(self, steps: int):
+        self.percent_dense = self.cfg.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
         l = [
-            {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
-            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
-            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
-            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
-            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+            {'params': [self._xyz], 'lr': self.cfg.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
+            {'params': [self._features_dc], 'lr': self.cfg.feature_lr, "name": "f_dc"},
+            {'params': [self._features_rest], 'lr': self.cfg.feature_lr / 20.0, "name": "f_rest"},
+            {'params': [self._opacity], 'lr': self.cfg.opacity_lr, "name": "opacity"},
+            {'params': [self._scaling], 'lr': self.cfg.scaling_lr, "name": "scaling"},
+            {'params': [self._rotation], 'lr': self.cfg.rotation_lr, "name": "rotation"}
         ]
 
-        if self.optimizer_type == "default":
-            self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
-        elif self.optimizer_type == "sparse_adam":
+        if self.cfg.optimizer_type == "default":
+            self.gs_optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        elif self.cfg.optimizer_type == "sparse_adam":
             try:
-                # self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
-                self.optimizer = None
+                # self.gs_optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
+                self.gs_optimizer = None
             except:
                 # A special version of the rasterizer is required to enable sparse adam
-                self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+                self.gs_optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
+        print(self.gs_optimizer)
         self.exposure_optimizer = torch.optim.Adam([self._exposure])
 
-        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
-                                                    lr_final=training_args.position_lr_final*self.spatial_lr_scale,
-                                                    lr_delay_mult=training_args.position_lr_delay_mult,
-                                                    max_steps=training_args.position_lr_max_steps)
+        self.xyz_scheduler_args = get_expon_lr_func(lr_init=self.cfg.position_lr_init*self.spatial_lr_scale,
+                                                    lr_final=self.cfg.position_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=self.cfg.position_lr_delay_mult,
+                                                    max_steps=self.cfg.position_lr_max_steps)
         
-        self.exposure_scheduler_args = get_expon_lr_func(training_args.exposure_lr_init, training_args.exposure_lr_final,
-                                                        lr_delay_steps=training_args.exposure_lr_delay_steps,
-                                                        lr_delay_mult=training_args.exposure_lr_delay_mult,
-                                                        max_steps=training_args.iterations)
+        self.exposure_scheduler_args = get_expon_lr_func(self.cfg.exposure_lr_init, self.cfg.exposure_lr_final,
+                                                        lr_delay_steps=self.cfg.exposure_lr_delay_steps,
+                                                        lr_delay_mult=self.cfg.exposure_lr_delay_mult,
+                                                        max_steps=steps)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -241,7 +268,7 @@ class GaussianModel:
             for param_group in self.exposure_optimizer.param_groups:
                 param_group['lr'] = self.exposure_scheduler_args(iteration)
 
-        for param_group in self.optimizer.param_groups:
+        for param_group in self.gs_optimizer.param_groups:
             if param_group["name"] == "xyz":
                 lr = self.xyz_scheduler_args(iteration)
                 param_group['lr'] = lr
@@ -267,6 +294,7 @@ class GaussianModel:
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        print(f"colors_size: {self._features_dc.size()}")
         f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
@@ -276,7 +304,9 @@ class GaussianModel:
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        print(attributes.shape)
         elements[:] = list(map(tuple, attributes))
+        # print(elements)
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
 
@@ -340,30 +370,30 @@ class GaussianModel:
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
-        for group in self.optimizer.param_groups:
+        for group in self.gs_optimizer.param_groups:
             if group["name"] == name:
-                stored_state = self.optimizer.state.get(group['params'][0], None)
+                stored_state = self.gs_optimizer.state.get(group['params'][0], None)
                 stored_state["exp_avg"] = torch.zeros_like(tensor)
                 stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
 
-                del self.optimizer.state[group['params'][0]]
+                del self.gs_optimizer.state[group['params'][0]]
                 group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
-                self.optimizer.state[group['params'][0]] = stored_state
+                self.gs_optimizer.state[group['params'][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
-        for group in self.optimizer.param_groups:
-            stored_state = self.optimizer.state.get(group['params'][0], None)
+        for group in self.gs_optimizer.param_groups:
+            stored_state = self.gs_optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
                 stored_state["exp_avg"] = stored_state["exp_avg"][mask]
                 stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
 
-                del self.optimizer.state[group['params'][0]]
+                del self.gs_optimizer.state[group['params'][0]]
                 group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
-                self.optimizer.state[group['params'][0]] = stored_state
+                self.gs_optimizer.state[group['params'][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
             else:
@@ -390,18 +420,18 @@ class GaussianModel:
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
-        for group in self.optimizer.param_groups:
+        for group in self.gs_optimizer.param_groups:
             assert len(group["params"]) == 1
             extension_tensor = tensors_dict[group["name"]]
-            stored_state = self.optimizer.state.get(group['params'][0], None)
+            stored_state = self.gs_optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
 
                 stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
                 stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
 
-                del self.optimizer.state[group['params'][0]]
+                del self.gs_optimizer.state[group['params'][0]]
                 group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
-                self.optimizer.state[group['params'][0]] = stored_state
+                self.gs_optimizer.state[group['params'][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
             else:
@@ -476,18 +506,18 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
+    def densify_and_prune(self, max_grad, min_opacity, max_screen_size, radii):
         grads = self.xyz_gradient_accum / (self.denom + 1e-8)
         grads[grads.isnan()] = 0.0
 
         self.tmp_radii = radii
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+        self.densify_and_clone(grads, max_grad, self.cameras_extent)
+        self.densify_and_split(grads, max_grad, self.cameras_extent)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * self.cameras_extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
         tmp_radii = self.tmp_radii
@@ -505,36 +535,13 @@ class GaussianModel:
 
 if __name__ == "__main__":
 
-    from gsplat import rasterization
-    from ..configs import OptimizationConfig
-    COLMAP_DATA = "/media/ram/T7/ply_collection/gerrard-hall"
-    pcd = BasicPointCloudScene()
-    pcd.create_from_colmap(
-        COLMAP_DATA,
-        partition_size=10,
-        partitions_n=32,
-        inv_poses=True
-    )
-    
-    opt_cfg = OptimizationConfig()
-    gs = GaussianModel(sh_degree=3)
-    gs.create_from_pcd(pcd, spatial_lr_scale=1.0)
-    gs.training_setup(opt_cfg)
-
-    xyz = gs.get_xyz
-    quats = gs.get_rotation
-    scalings = gs.get_scaling
-    features = gs.get_features
-    features_ds = gs.get_features_dc
-    features_rest = gs.get_features_rest
-    opacties = gs.get_opacity.squeeze() 
-    print(f"""
-    xyz: {xyz.size()},
-    quats: {quats.size()},
-    scaling: {scalings.size()},
-    features: {features.size()},
-    features_ds: {features_ds.size()},
-    features_rest: {features_rest.size()},
-    opacities: {opacties.size()}
-    """)
-    print("SUCCECFULL GS INITIALIZATION !!!!")
+    model = GaussianModel(1, "default", "cuda")
+    initial_pkg = {
+        "viewpointsN": 100,
+        "xyz": np.random.normal(0, 1, (100, 3)),
+        "colors": np.random.rand(100, 3),
+        "normals": np.random.normal(0, 1, (100, 3)),
+        "cameras_extent": torch.tensor(4.089)
+    }
+    model.create_from_pcd(initial_pkg, spatial_lr_scale=1.0)
+    model.save_ply("test.ply")
