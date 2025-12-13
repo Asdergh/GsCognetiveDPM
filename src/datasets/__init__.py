@@ -15,7 +15,7 @@ class DataLoaderConfig:
     params: Optional[DictConfig]=None
     batch_size: Optional[int]=32
     shuffle: Optional[bool]=False
-
+    num_workers: Optional[int]=0
 
 
 class NeuroSplatDataModule(LightningDataModule):
@@ -53,7 +53,8 @@ class NeuroSplatDataModule(LightningDataModule):
         return DataLoader(
             dataset=self.trainset,
             batch_size=self.cfg.train.batch_size,
-            shuffle=self.cfg.train.shuffle
+            shuffle=self.cfg.train.shuffle,
+            num_workers=self.cfg.train.num_workers
         )
     
     def val_dataloader(self) -> DataLoader:
@@ -66,7 +67,8 @@ class NeuroSplatDataModule(LightningDataModule):
         return DataLoader(
             dataset=self.valset,
             batch_size=self.cfg.validation.batch_size,
-            shuffle=self.cfg.validation.shuffle
+            shuffle=self.cfg.validation.shuffle,
+            num_workers=self.cfg.validation.num_workers
         )
     
     def test_dataloader(self) -> DataLoader:
@@ -79,7 +81,8 @@ class NeuroSplatDataModule(LightningDataModule):
         return DataLoader(
             dataset=self.trainset,
             batch_size=self.cfg.test.batch_size,
-            shuffle=self.cfg.test.shuffle
+            shuffle=self.cfg.test.shuffle,
+            num_workers=self.cfg.test.num_workers
         )
 
 if __name__ == "__main__":

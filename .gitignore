@@ -1,4 +1,5 @@
 venv/
 runs/
 meta/
+lightning_logs/
 *.ply

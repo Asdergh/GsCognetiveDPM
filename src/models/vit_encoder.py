@@ -25,7 +25,6 @@ class VisualPatchEncoder(nn.Module):
         
         super().__init__()
         self.blocks_n = blocks_n
-        h, w = img_size
         ph, pw = patch_size
         # pN = int((w * h) / (pw * ph))
         self.backbone_ = nn.Sequential(

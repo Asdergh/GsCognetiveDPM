@@ -17,7 +17,7 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--objective2monitor", type=str, default="d-ssim")
     parser.add_argument("--k_top_ckpt", type=int, default=3)
-    parser.add_argument("--patience", type=int, default=3)
+    parser.add_argument("--patience", type=int, default=1000)
     parser.add_argument("--epochs_per_val_step", type=int, default=3)
     args = parser.parse_args()
 

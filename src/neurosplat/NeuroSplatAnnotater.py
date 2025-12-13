@@ -67,7 +67,7 @@ class NeuroSplatAnnotater(l.LightningModule, GaussianModel):
 
     def on_train_start(self):
         print("START TRAINING PROCEDURE !!!")
-        initial_pkg = self.trainer.train_dataloader.dataset.points_attrs
+        initial_pkg = self.trainer.train_dataloader.dataset.points_attrs   
         self.create_from_pcd(initial_pkg, 1.0)
         self.training_setup(self._steps)
 
@@ -81,12 +81,12 @@ class NeuroSplatAnnotater(l.LightningModule, GaussianModel):
                 
                 self.max_radii2D[vis_filter] = torch.max(self.max_radii2D[vis_filter], radii[vis_filter])
                 self.add_densification_stats(view_pts, vis_filter)
-                if (current_step > self.cfg.densify_from_step and 
-                    current_step % self.cfg.densification_interval == 0):
+                if (current_step >= self.cfg.densify_from_step and 
+                    (current_step % self.cfg.densification_interval) == 0):
                     print("RUNNING DENSIFICATION !!!")
                     self.densify_and_prune(
-                        self.cfg.densify_grad_trashhold, 0.005,
-                        self.cfg.size_trashold,
+                        self.cfg.grad_trashold, 0.005,
+                        self.cfg.size_trashold, radii
                     )
                     print("DENSIFICATION COMPLITED!!!")
                     print(f"N GAUSSIANS AFTER DENSIFICATION: {self.get_xyz.size()}")
@@ -181,6 +181,7 @@ class NeuroSplatAnnotater(l.LightningModule, GaussianModel):
             self._tb_writer.add_scalar("Dssim", Dssim, gs)
             self._tb_writer.add_scalar("L1", L1, gs)
             self._tb_writer.add_scalar("L2", L2, gs)
+            self._tb_writer.add_scalar("opacity_mean", self.get_opacity.mean(), gs)
             # self._tb_writer.add_scalar("L1", L1, gs)
 
             idx_bf = torch.randint(0, B, (self.cfg.n_views2log, ))

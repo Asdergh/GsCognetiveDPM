@@ -47,13 +47,15 @@ class MipNerfDataset(Dataset):
         pts_partition_size: Optional[int]=1000,
         pts_partitions_n: Optional[int]=40,
         pts_shuffle: Optional[bool]=False,
-        pts_scale: Optional[float]=1.0,
+        scene_scale: Optional[float]=1.0,
+        cameras_scale: Optional[float]=1.0,
         normal_knn: Optional[int]=11,
         normal_radii: Optional[float]=0.1
     ) -> None:
         
         super().__init__()
-        self.pts_scale = pts_scale
+        self.scene_scale = scene_scale
+        self.cameras_scale = cameras_scale
         assert scene_type in os.listdir(path), (f"""
         scene type must one of folders in data_path.
         scene_type: {scene_type}, data_path containment: {os.listdir(path)}
@@ -122,11 +124,11 @@ class MipNerfDataset(Dataset):
     def points_attrs(self) -> Dict[str, Any]:
         
         return {
-            "xyz": torch.Tensor(self.o3d_pcd.points) * self.pts_scale,
+            "xyz": torch.Tensor(self.o3d_pcd.points) * self.scene_scale,
             "rgb": torch.Tensor(self.o3d_pcd.colors) / 255.0,
             "normals": torch.Tensor(self.o3d_pcd.normals),
             "cameras_extent": torch.tensor(self.cameras_extent),
-            "viewpointsN": len(self.imgs_fs)
+            "viewpointsN": self.imgs.size(0)
         }
     
     def _parse_points_and_cams(self, path, images_path,
@@ -182,7 +184,7 @@ class MipNerfDataset(Dataset):
         imgs_N = len(imgs_ids)
         self.Ks = np.zeros((imgs_N, 3, 3))
         self.viewmats = np.zeros((imgs_N, 4, 4))
-        self.imgs_fs = []
+        self.imgs = np.zeros((imgs_N, 3, t_img_s[0], t_img_s[1]))
         with tqdm(
             total=len(imgs_ids),
             desc="Collecting Images from annotations ...",
@@ -201,33 +203,38 @@ class MipNerfDataset(Dataset):
                 ])
                 viewmat = np.eye(4)
                 Rmat = self.poses[img_annot.id - 1, :3, :3]
-                Rmat[:, -1] *= -1
-                Rmat[:, 0] *= -1
+                InvMat = np.array([
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, -1.0, 0.0, 0.0],
+                    [0.0, 0.0, -1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0]
+                ])
                 Translation = self.poses[img_annot.id - 1, :3, 3]
                 
                 viewmat[:3, :3] = Rmat
-                viewmat[:3, 3] = Translation
+                viewmat[:3, 3] = Translation * self.cameras_scale
+                viewmat = InvMat @ viewmat
 
                 try:
                     self.Ks[idx - 1, ...] = K
                     self.viewmats[idx - 1, ...] = viewmat
-                    self.imgs_fs.append(os.path.join(images_path, img_annot.name))
+                    img = self.imgs_transform(os.path.join(images_path, img_annot.name))
+                    self.imgs[idx, ...] = img
                     annots_bar.update(1)
                 
                 except:
                     pass
-
+        
+        self.imgs = torch.Tensor(self.imgs)
         self.viewmats = torch.Tensor(self.viewmats)
         self.Ks = torch.Tensor(self.Ks)
         
     def __len__(self) -> int:
-        return len(self.imgs_fs)
+        return self.imgs.size(0)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        img_f = self.imgs_fs[idx]
-        img = self.imgs_transform(img_f)
         return {
-            "gt-rgb": img,
+            "gt-rgb": self.imgs[idx],
             "viewmats": self.viewmats[idx],
             "Ks": self.Ks[idx]
         }
@@ -244,7 +251,7 @@ class MipNerfDataset(Dataset):
 #         path=path,
 #         target_size=(112, 224),
 #         normal_knn=30,
-#         pts_scale=1.0,
+#         scene_scale=1.0,
 #         normal_radii=0.1,
 #         scene_type="counter",
 #         pts_partition_size=10000,

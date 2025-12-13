@@ -2,6 +2,7 @@ data_sampler:
   train:
     name: mip-nerf
     batch_size: 32
+    num_workers: 15
     shuffle: false
     params:
       path: /home/ram/Downloads/360_v2
@@ -13,12 +14,14 @@ data_sampler:
       pts_partition_size: 10000
       pts_partitions_n: 10
       pts_shuffle: false
-      pts_scale: 3e+1
+      scene_scale: 3e+1
+      cameras_scale: 4e+1
       normal_knn: 30
       normal_radii: 0.1
   validation:
     name: mip-nerf
     batch_size: 32
+    num_workers: 15
     shuffle: false
     params:
       path: /home/ram/Downloads/360_v2
@@ -30,7 +33,8 @@ data_sampler:
       pts_partition_size: 10000
       pts_partitions_n: 5
       pts_shuffle: true
-      pts_scale: 3e+1
+      scene_scale: 3e+1
+      cameras_scale: 4e+1
       normal_knn: 30
       normal_radii: 0.1
 pipeline:
@@ -44,7 +48,7 @@ pipeline:
   position_lr_delay_mult: 0.01
   position_lr_max_steps: 30000.0
   feature_lr: 0.0025
-  opacity_lr: 0.025
+  opacity_lr: 0.25
   scaling_lr: 0.005
   rotation_lr: 0.001
   exposure_lr_init: 0.01
@@ -65,8 +69,8 @@ pipeline:
   - splats
   - splats-normal
   log_from_step: 0
-  log_until_step: 10000
-  log_per_steps: 200
+  log_until_step: 1000
+  log_per_steps: 30
   n_views2log: 2
   steps2log: []
   losses:
@@ -81,6 +85,6 @@ pipeline:
   - 0.0
   - 0.0
   scaling_modifier: 1.0
-  densify_until_step: 10000
-  densify_from_step: 100
-  densification_interval: 500
+  densify_until_step: 1000
+  densify_from_step: 0
+  densification_interval: 30
