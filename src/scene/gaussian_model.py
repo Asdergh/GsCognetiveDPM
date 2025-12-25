@@ -35,9 +35,10 @@ class GaussianModel:
     @dataclass 
     class Config:
         #general for gaussian model
-        loging_path: str
+        loging_path: Optional[str]="/home/ram/Desktop/own_projects/tmp/GsCognetiveDPM/meta/splats_collection"
         sh_degree: Optional[int]=1
         device: Optional[str]="cuda"
+        with_segmentation: Optional[bool]=False
 
         # optimization params
         grad_trashold: Optional[float]=0.0002
@@ -50,6 +51,7 @@ class GaussianModel:
         opacity_lr: Optional[float]=0.025
         scaling_lr: Optional[float]=0.005
         rotation_lr: Optional[float]=0.001
+        segmentation_lr: Optional[float]=0.01
         exposure_lr_init: Optional[float]=0.01
         exposure_lr_final: Optional[float]=0.001
         exposure_lr_delay_steps: Optional[float]=0
@@ -83,6 +85,9 @@ class GaussianModel:
 
     def __init__(self):
 
+        if not hasattr(self, "cfg"):
+            self.cfg = self.Config()
+
         self.max_sh_degree = self.cfg.sh_degree
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
@@ -90,6 +95,7 @@ class GaussianModel:
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
+        self._weights = torch.empty(0)
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -108,6 +114,7 @@ class GaussianModel:
             self._scaling,
             self._rotation,
             self._opacity,
+            self._weights,
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
@@ -123,6 +130,7 @@ class GaussianModel:
         self._scaling, 
         self._rotation, 
         self._opacity,
+        self._weights,
         self.max_radii2D, 
         xyz_gradient_accum, 
         denom,
@@ -166,6 +174,10 @@ class GaussianModel:
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
+
+    @property
+    def get_semantic_weights(self):
+        return self._weights
     
     @property
     def get_exposure(self):
@@ -186,25 +198,25 @@ class GaussianModel:
 
     def create_from_pcd(self, initial_pkg: Dict[str, Any], spatial_lr_scale : float):
 
-        self.cameras_extent = initial_pkg["cameras_extent"].to(self.device)
+        self.cameras_extent = initial_pkg["cameras_extent"].to(self.cfg.device)
         # print(f"Scence Extent: {self.cameras_extent}")
 
         self.spatial_lr_scale = spatial_lr_scale
-        fused_point_cloud = torch.Tensor(np.asarray(initial_pkg["xyz"])).to(self.device)
-        fused_color = RGB2SH(torch.Tensor(np.asarray(initial_pkg["rgb"])).to(self.device))
-        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).to(self.device)
+        fused_point_cloud = torch.Tensor(np.asarray(initial_pkg["xyz"])).to(self.cfg.device)
+        fused_color = RGB2SH(torch.Tensor(np.asarray(initial_pkg["rgb"])).to(self.cfg.device))
+        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).to(self.cfg.device)
         features[:, :3, 0 ] = fused_color
         features[:, 3:, 1:] = 0.0
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
-        # dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).to(self.device)), 0.0000001)
+        # dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).to(self.cfg.device)), 0.0000001)
         # scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
         if ("initial_scales" in initial_pkg) and (initial_pkg["initial_scales"] is not None):
-            scales = torch.Tensor(initial_pkg["initial_scales"]).to(self.device)
+            scales = torch.Tensor(initial_pkg["initial_scales"]).to(self.cfg.device)
         
         else:
-            scales = torch.rand_like(fused_point_cloud).to(self.device)
+            scales = torch.rand_like(fused_point_cloud).to(self.cfg.device)
             print(f"SCALES INITIALIZED RANDOMLY!!: {scales.size()}")
 
         print(f"INITIAL SCALES SIZE: {scales.min()}, {scales.mean()}, {scales.max()}")
@@ -219,6 +231,9 @@ class GaussianModel:
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        if self.cfg.with_segmentation:
+            self._weights = nn.Parameter(torch.zeros_like(self._opacity).requires_grad_(True))
+
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         # self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
         self.pretrained_exposures = None
@@ -238,6 +253,8 @@ class GaussianModel:
             {'params': [self._scaling], 'lr': self.cfg.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': self.cfg.rotation_lr, "name": "rotation"}
         ]
+        if self.cfg.with_segmentation:
+            l.append({"params": [self._weights], "lr": self.cfg.segmentation_lr, "name": "weights"})
 
         if self.cfg.optimizer_type == "default":
             self.gs_optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -274,13 +291,14 @@ class GaussianModel:
                 param_group['lr'] = lr
                 return lr
 
-    def construct_list_of_attributes(self):
+    def construct_list_of_attributes(self, with_sh_bands: Optional[bool]=True):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
         # All channels except the 3 DC
         for i in range(self._features_dc.shape[1]*self._features_dc.shape[2]):
             l.append('f_dc_{}'.format(i))
-        for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
-            l.append('f_rest_{}'.format(i))
+        if with_sh_bands:
+            for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
+                l.append('f_rest_{}'.format(i))
         l.append('opacity')
         for i in range(self._scaling.shape[1]):
             l.append('scale_{}'.format(i))
@@ -288,24 +306,44 @@ class GaussianModel:
             l.append('rot_{}'.format(i))
         return l
 
-    def save_ply(self, path):
+    def save_ply(self, path, rgb_map: Optional[torch.Tensor]=None):
         # mkdir_p(os.path.dirname(path))
 
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
-        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        if rgb_map is None:
+            features_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+            features_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+            print(features_dc.shape, features_rest.shape)
+        
+        else:
+            features_dc = rgb_map.cpu().numpy()
+
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
 
-        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+        dtype_full = [
+            (attribute, 'f4') 
+            for attribute in self.construct_list_of_attributes(with_sh_bands=(rgb_map is None))
+        ]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
-        print(attributes.shape)
+        
+        if rgb_map is None:
+            attributes = np.concatenate([
+                xyz, normals, 
+                features_dc, features_rest, 
+                opacities, 
+                scale, rotation
+            ], axis=1)
+        else:
+            attributes = np.concatenate([
+                xyz, normals,
+                features_dc, opacities,
+                scale, rotation
+            ], axis=1)
         elements[:] = list(map(tuple, attributes))
-        # print(elements)
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
 
@@ -321,7 +359,7 @@ class GaussianModel:
             if os.path.exists(exposure_file):
                 with open(exposure_file, "r") as f:
                     exposures = json.load(f)
-                self.pretrained_exposures = {image_name: torch.FloatTensor(exposures[image_name]).requires_grad_(False).to(self.device) for image_name in exposures}
+                self.pretrained_exposures = {image_name: torch.FloatTensor(exposures[image_name]).requires_grad_(False).to(self.cfg.device) for image_name in exposures}
                 print(f"Pretrained exposures loaded.")
             else:
                 print(f"No exposure to be loaded at {exposure_file}")

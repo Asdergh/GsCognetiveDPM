@@ -131,6 +131,37 @@ class MipNerfDataset(Dataset):
             "viewpointsN": self.imgs.size(0)
         }
     
+    def data_preview(self, origin: Optional[str]="origin_mip-nerf"):
+
+        rr.init(origin, spawn=True)
+        pts_attrs = self.points_attrs
+        rr.log(
+            f"{origin}/Points",
+            rr.Points3D(
+                positions=pts_attrs["xyz"],
+                colors=pts_attrs["rgb"],
+                radii=0.008
+            )
+        )
+        for idx, (rgb, viewmat, K) in enumerate(zip(self.imgs, self.viewmats, self.Ks)):
+            if idx == 0:
+                print(K)
+            rr.log(
+                f"{origin}/Frame_{idx}",
+                rr.Transform3D(
+                    translation=viewmat[:3, 3],
+                    mat3x3=viewmat[:3, :3]
+                ),
+                rr.Pinhole(image_from_camera=K),
+                rr.Image(rgb.permute(1, 2, 0))
+            )
+        blueprint = rrb.Blueprint(
+            rrb.Spatial3DView(
+                origin=origin
+            )
+        )
+        rr.send_blueprint(blueprint)
+
     def _parse_points_and_cams(self, path, images_path,
                                part_size, parts_n, shuffle, 
                                imgs_annots, cams_params,
@@ -203,7 +234,10 @@ class MipNerfDataset(Dataset):
                 ])
                 viewmat = np.eye(4)
                 Rmat = self.poses[img_annot.id - 1, :3, :3]
-                InvMat = np.array([
+                # Rotx = R.from_rotvec(np.array([1.0, 0.0, 0.0]) * -180.0, degrees=True).as_matrix()
+                # Roty = R.from_rotvec(np.array([0.0, 1.0, 0.0]) * 180.0, degrees=True).as_matrix()
+                Rot = R.from_euler("z", -90, degrees=True).as_matrix()
+                ProjMat = np.array([
                     [1.0, 0.0, 0.0, 0.0],
                     [0.0, -1.0, 0.0, 0.0],
                     [0.0, 0.0, -1.0, 0.0],
@@ -211,9 +245,10 @@ class MipNerfDataset(Dataset):
                 ])
                 Translation = self.poses[img_annot.id - 1, :3, 3]
                 
-                viewmat[:3, :3] = Rmat
-                viewmat[:3, 3] = Translation * self.cameras_scale
-                viewmat = InvMat @ viewmat
+                viewmat[:3, :3] = Rot @ Rmat 
+                viewmat[:3, 3] = (Translation * self.cameras_scale)
+                viewmat = ProjMat @ viewmat
+        
 
                 try:
                     self.Ks[idx - 1, ...] = K

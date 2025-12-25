@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import math as mt
 import torch.nn.functional as F
-from .layers import Block, get_activation
+from .blocks import (Block, get_activation)
 from typing import (Optional, List, Tuple)
 from einops.layers.torch import Rearrange
 

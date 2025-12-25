@@ -3,6 +3,7 @@ import torch.nn as nn
 import lightning as l
 import os
 import matplotlib.cm as cm
+from abc import (ABC, abstractmethod)
 from typing import (Optional, Tuple, Dict, Any, List, Union)
 from dataclasses import (dataclass, field)
 from gsplat import rasterization
@@ -16,7 +17,7 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 
-class NeuroSplatAnnotater(l.LightningModule, GaussianModel):
+class BaseModel(l.LightningModule, GaussianModel, ABC):
     @dataclass
     class Config(GaussianModel.Config):
         #aux
@@ -120,15 +121,15 @@ class NeuroSplatAnnotater(l.LightningModule, GaussianModel):
             rgb = rgb_map
 
         render, alphas, meta = rasterization(
-            means=self.get_xyz.repeat(B, 1, 1),
-            quats=self.get_rotation.repeat(B, 1, 1),
-            scales=self.get_scaling.repeat(B, 1, 1),
+            means=self.get_xyz,
+            quats=self.get_rotation,
+            scales=self.get_scaling,
             colors=rgb,
-            opacities=self.get_opacity.squeeze().repeat(B, 1),
+            opacities=self.get_opacity.squeeze(),
             width=self.cfg.resolution[1], 
             height=self.cfg.resolution[0],
-            viewmats=torch.transpose(viewmats[None], 0, 1),
-            Ks=torch.transpose(Ks[None], 0, 1),
+            viewmats=viewmats,
+            Ks=Ks,
             packed=False
         )
        
@@ -141,66 +142,127 @@ class NeuroSplatAnnotater(l.LightningModule, GaussianModel):
             "depth": alphas.squeeze()
         }
     
-    
-    def _step(self, batch, mode="train") -> float:
+    def log_datapkg(self, loging_pkg: Tuple[Dict[str, Any]]) -> None:
+        gs = self.global_step
+        for param in loging_pkg:
+            if ("lightning" in param["writer"]
+                and param["type"] == "scalar"):
+                self.log(param["name"], param["value"], gs)
+            if param["writer"] in ["tensorboard", "tb"]:
+                if param["type"] == "scalar":
+                    self._tb_writer(param["name"], param["value"], gs)
+                else:
+                    image = param["value"]
+                    if param["bached"]:
+                        idx = torch.randint(0, image.size(0), (self.cfg.n_views2log, ))
+                        image = make_grid(image[idx, ...])
+                    self._tb_writer.image(param["name"], image, gs)
 
-        gts = batch["gt-rgb"]
-        viewmats = batch["viewmats"]
-        Ks = batch["Ks"]
-        B = viewmats.size(0)
-        render_pkg = self.render(viewmats, Ks)
-        self.render_cache_ = (
-            render_pkg["radii"], 
-            render_pkg["visibility_filter"], 
-            render_pkg["viewspace_points"]
-        )
-        render, alphas =  (render_pkg["render"], render_pkg["depth"])
-        alphas = torch.Tensor(cm.inferno(alphas.cpu().detach().numpy()))
-        alphas = alphas[..., :-1].permute(0, -1, 1, 2)
 
-        Dssim = (0.0 if "d-ssim" not in self.Losses
-                    else self.Losses["d-ssim"](render, gts))
-        L1 = (0.0 if "l1" not in self.Losses
-                else self.Losses["l1"](render, gts))
-        L2 = (0.0 if "l1" not in self.Losses
-                else self.Losses["mse"](render, gts))
+    # def _step(self, batch, mode="train") -> float:
+
+        # gts = batch["gt-rgb"]
+        # viewmats = batch["viewmats"]
+        # Ks = batch["Ks"]
+        # B = viewmats.size(0)
+        # render_pkg = self.render(viewmats, Ks)
+        # self.render_cache_ = (
+        #     render_pkg["radii"], 
+        #     render_pkg["visibility_filter"], 
+        #     render_pkg["viewspace_points"]
+        # )
+        # render, alphas =  (render_pkg["render"], render_pkg["depth"])
+        # alphas = torch.Tensor(cm.inferno(alphas.cpu().detach().numpy()))
+        # alphas = alphas[..., :-1].permute(0, -1, 1, 2)
+
+        # Dssim = (0.0 if "d-ssim" not in self.Losses
+        #             else self.Losses["d-ssim"](render, gts))
+        # L1 = (0.0 if "l1" not in self.Losses
+        #         else self.Losses["l1"](render, gts))
+        # L2 = (0.0 if "l1" not in self.Losses
+        #         else self.Losses["mse"](render, gts))
         # PerceptiveLoss = (0.0 if "perceptive" not in self.Losses
         #       else self.Losses["perceptive"](render, gt))
         
-        loss = (Dssim + L1 + L2)
+        # loss = (Dssim + L1 + L2)
 
         #loging into LightninLogger to monitor
-        self.log(f"{mode}/d-ssim-loss", Dssim)
-        self.log(f"{mode}/l1-loss", L1)
-        self.log(f"{mode}/l2-loss", L2)
-        self.log(f"{mode}/general-loss", loss)
+        # self.log(f"{mode}/d-ssim-loss", Dssim)
+        # self.log(f"{mode}/l1-loss", L1)
+        # self.log(f"{mode}/l2-loss", L2)
+        # self.log(f"{mode}/general-loss", loss)
 
-        # loging to tb_writer
-        if mode == "train":
-            gs = self.global_step
-            self._tb_writer.add_scalar("Dssim", Dssim, gs)
-            self._tb_writer.add_scalar("L1", L1, gs)
-            self._tb_writer.add_scalar("L2", L2, gs)
-            self._tb_writer.add_scalar("opacity_mean", self.get_opacity.mean(), gs)
-            # self._tb_writer.add_scalar("L1", L1, gs)
+        # # loging to tb_writer
+        # if mode == "train":
+        #     gs = self.global_step
+        #     self._tb_writer.add_scalar("Dssim", Dssim, gs)
+        #     self._tb_writer.add_scalar("L1", L1, gs)
+        #     self._tb_writer.add_scalar("L2", L2, gs)
+        #     self._tb_writer.add_scalar("opacity_mean", self.get_opacity.mean(), gs)
+        #     # self._tb_writer.add_scalar("L1", L1, gs)
 
-            idx_bf = torch.randint(0, B, (self.cfg.n_views2log, ))
-            self._tb_writer.add_image("gt_rgb", make_grid(gts[idx_bf, ...]), gs)
-            self._tb_writer.add_image("render_rgb", make_grid(render[idx_bf, ...]), gs)
-            self._tb_writer.add_image("depth", make_grid(alphas[idx_bf, ...]), gs)
-
-        return loss
+        #     idx_bf = torch.randint(0, B, (self.cfg.n_views2log, ))
+        #     self._tb_writer.add_image("gt_rgb", make_grid(gts[idx_bf, ...]), gs)
+        #     self._tb_writer.add_image("render_rgb", make_grid(render[idx_bf, ...]), gs)
+        #     self._tb_writer.add_image("depth", make_grid(alphas[idx_bf, ...]), gs)
+        # log_pkg = (
+        #     {"name": f"{mode}_d-ssim-loss", "value": Dssim, "writer": ["lightning", "tb"], "type": "scalar"},
+        #     {"name": f"{mode}_l1-loss", "value": L1, "writer": ["lightning", "tb"], "type": "scalar"},
+        #     {"name": f"{mode}_l2-loss", "value": L2, "writer": ["lightning", "tb"], "type": "scalar"},
+        #     {"name": f"{mode}_general-loss", "value": loss, "writer": ["lightning", "tb"], "type": "scalar"},
+        # )
+        # if mode == "train":
+        #     train_log_pkg = (
+        #         {
+        #           "name": f"gt_rgb", 
+        #              "value": gts, 
+                    # "batched": True, 
+                    # "writer": ["tb"], 
+                    # "type": "image"
+        #           },
+        #         {"name": f"render_rgb", "value": render, "batched": True, "writer": ["tb"], "type": "image"},
+        #         {"name": f"alphas", "value": alphas, "batched": True, "writer": ["tb"], "type": "image"},
+        #     )
+        #     log_pkg += train_log_pkg
         
+        # self.log_datapkg(log_pkg)
+            
+
+        # return loss
+    
+    @abstractmethod
     def training_step(self, batch, batch_idx) -> float:
-        return self._step(batch, mode="train")
+        """
+        Docstring for training_step
+        
+        :param batch: input batch for training step
+        :param batch_idx: general idx of train batch
+        :return: loss during training step
+        :rtype: float
+        """
+        # return self._step(batch, mode="train")
         
     
+    @abstractmethod
     def validation_step(self, batch, batch_idx) -> float:
-        with torch.no_grad():
-            return self._step(batch, mode="val")
-            
+        """
+        Docstring for validation_step
+        
+        :param batch: input batch for validation step
+        :param batch_idx: general idx of validation batch
+        :return: loss during validation step
+        :rtype: float
+        """
+        # with torch.no_grad():
+        #     return self._step(batch, mode="val")
+        
+    @abstractmethod
     def configure_optimizers(self):
-        return self.gs_optimizer
+        """
+        Docstring for configure_optimizers
+        method for optimization settings initializations
+        """
+        # return self.gs_optimizer
         
         
 

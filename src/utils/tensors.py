@@ -5,12 +5,20 @@ from typing import (Optional, Tuple)
 
 
 
-def spatial2seq(x: torch.Tensor, format: Optional[str]="BCWH"):
-    if format == "BCWH":
+def spatial2seq(
+    x: torch.Tensor, 
+    input_format: Optional[str]="BCWH",
+    output_format: Optional[str]="BCN"
+):
+    if input_format == "BCWH":
         x = torch.flatten(x, start_dim=-2)
-    elif format == "BWHC":
+        if output_format == "BNC":
+            x = x.transpose(-1, -2)
+
+    elif input_format == "BWHC":
         x = torch.flatten(x, start_dim=1, end_dim=-2)
-        x = x.transpose(-1, -2)
+        if output_format == "BCN":
+            x = x.transpose(-1, -2)
     return x
 
 def seq2spatial(
@@ -18,16 +26,24 @@ def seq2spatial(
     img_size: Optional[Tuple[int, int]]=None,
     patch_size: Optional[Tuple[int, int]]=None,
     patches_n: Optional[Tuple[int, int]]=None,
-    format: Optional[str]="BCN",
+    input_format: Optional[str]="BCN",
+    output_format: Optional[str]="BCWH"
 ):
     
     def seq2sp(x, pNx, pNy):
-        if format == "BCN":
+        if input_format == "BCN":
             x = x.view(x.size(0), x.size(1), pNx, pNy)
-        elif format == "BNC":
+            if output_format == "BWHC":
+                x = x.permute(0, -1, -2, 1)
+
+        elif input_format == "BNC":
             x = x.view(x.size(0), pNx, pNy, x.size(-1))
+            if output_format == "BCWH":
+                x = x.permute(0, -1, 1, 2)
+
         else:
             raise ValueError("unkown tensor format")
+        
         return x
         
     assert (not(img_size is None

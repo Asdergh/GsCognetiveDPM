@@ -85,47 +85,47 @@ class NeuroSplatDataModule(LightningDataModule):
             num_workers=self.cfg.test.num_workers
         )
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
     
-    config = {
-        "train": {
-            "name": "mip-nerf",
-            "batch_size": 32,
-            "shuffle": False,
-            "params": {
-                "path": "/home/ram/Downloads/360_v2",
-                "target_size": (112, 224),
-                "scene_type": "counter",
-                "images_scale": 1,
-                "pts_partition_size": 10000,
-                "pts_partitions_n": 10,
-                "pts_shuffle": False,
-                "normal_knn": 30,
-                "normal_radii": 0.1
-            }
-        },
-        "validation": {
-            "name": "mip-nerf",
-            "batch_size": 32,
-            "shuffle": False,
-            "params": {
-                "path": "/home/ram/Downloads/360_v2",
-                "target_size": (112, 224),
-                "scene_type": "counter",
-                "images_scale": 1,
-                "pts_partition_size": 10000,
-                "pts_partitions_n": 5,
-                "pts_shuffle": True,
-                "normal_knn": 30,
-                "normal_radii": 0.1
-            }
-        }
-    }
-    # cfg = OmegaConf.(config)
-    OmegaConf.save(config, "/home/ram/Desktop/own_projects/tmp/GsCognetiveDPM/src/configs/data_sampler.yaml")
-    dm = NeuroSplatDataModule(config)
-    dm.setup("fit")
-    train_loader = dm.train_dataloader()
-    print(train_loader.dataset)
+#     config = {
+#         "train": {
+#             "name": "mip-nerf",
+#             "batch_size": 32,
+#             "shuffle": False,
+#             "params": {
+#                 "path": "/home/ram/Downloads/360_v2",
+#                 "target_size": (112, 224),
+#                 "scene_type": "counter",
+#                 "images_scale": 1,
+#                 "pts_partition_size": 10000,
+#                 "pts_partitions_n": 10,
+#                 "pts_shuffle": False,
+#                 "normal_knn": 30,
+#                 "normal_radii": 0.1
+#             }
+#         },
+#         "validation": {
+#             "name": "mip-nerf",
+#             "batch_size": 32,
+#             "shuffle": False,
+#             "params": {
+#                 "path": "/home/ram/Downloads/360_v2",
+#                 "target_size": (112, 224),
+#                 "scene_type": "counter",
+#                 "images_scale": 1,
+#                 "pts_partition_size": 10000,
+#                 "pts_partitions_n": 5,
+#                 "pts_shuffle": True,
+#                 "normal_knn": 30,
+#                 "normal_radii": 0.1
+#             }
+#         }
+#     }
+#     # cfg = OmegaConf.(config)
+#     OmegaConf.save(config, "/home/ram/Desktop/own_projects/tmp/GsCognetiveDPM/src/configs/data_sampler.yaml")
+#     dm = NeuroSplatDataModule(config)
+#     dm.setup("fit")
+#     train_loader = dm.train_dataloader()
+#     print(train_loader.dataset)
 
     

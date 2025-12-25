@@ -22,54 +22,81 @@ get_activation = lambda act_type: (
     _ACTIVATIONS_[act_type]() 
 )
 
-def build_conv_stack(
-    i_f: int, o_f: int, activation: str, 
-    norm: Optional[bool]=True, 
-    kernel_size: Optional[Tuple[int, int]]=(3, 3), 
-    stride: Optional[int]=1, 
-    padding: Optional[int]=1, 
-    output_padding: Optional[int]=1,
-    mode: Optional[str]="down", 
-    sampler: Optional[str]="conv", 
-    scale_factor: Optional[str]=2
-):
-    
-    if sampler == "default":
-        sampler_x = nn.Sequential(
-            nn.Upsample(scale_factor=scale_factor),
-            nn.Conv2d(
-                in_channels=i_f,
-                out_channels=o_f, 
-                kernel_size=(3, 3), 
-                stride=1, 
-                padding=1
-            )
+class BasicLinear(nn.Module):
+    def __init__(
+        self,
+        in_features: int, 
+        out_features: int, 
+        activation: str, 
+        norm: Optional[bool]=True
+    ):
+        super().__init__()
+        self.base_ = nn.Sequential(
+            nn.Linear(in_features, out_features),
+            get_activation(activation),
+            (nn.Identity() if not norm else nn.LayerNorm(out_features))
         )
     
-    elif sampler == "conv":
-        if mode == "up":
-            sampler_x = nn.ConvTranspose2d(
-                in_channels=i_f,
-                out_channels=o_f,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding,
-                output_padding=output_padding
-            )
-        if mode == "down":
-            sampler_x = nn.Conv2d(
-                in_channels=i_f,
-                out_channels=o_f,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding
-            )
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.base_(x)
 
-    return nn.Sequential(
-        sampler_x,
-        (nn.Identity() if not norm else nn.BatchNorm2d(o_f)),
-        get_activation(activation)
-    )
+class BasicConv(nn.Module):
+    
+    def __init__(
+        self, 
+        in_features: int, 
+        out_features: int, 
+        activation: str, 
+        norm: Optional[bool]=True, 
+        kernel_size: Optional[Tuple[int, int]]=(3, 3), 
+        stride: Optional[int]=1, 
+        padding: Optional[int]=1, 
+        output_padding: Optional[int]=1,
+        mode: Optional[str]="down", 
+        sampler: Optional[str]="conv", 
+        scale_factor: Optional[str]=2
+    ):
+    
+        super().__init__()
+        if sampler == "default":
+            sampler_x = nn.Sequential(
+                nn.Upsample(scale_factor=scale_factor),
+                nn.Conv2d(
+                    in_channels=in_features,
+                    out_channels=out_features, 
+                    kernel_size=(3, 3), 
+                    stride=1, 
+                    padding=1
+                )
+            )
+        
+        elif sampler == "conv":
+            if mode == "up":
+                sampler_x = nn.ConvTranspose2d(
+                    in_channels=in_features,
+                    out_channels=out_features,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                    output_padding=output_padding
+                )
+            if mode == "down":
+                sampler_x = nn.Conv2d(
+                    in_channels=in_features,
+                    out_channels=out_features,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding
+                )
+
+        self.base_ = nn.Sequential(
+            sampler_x,
+            (nn.Identity() if not norm else nn.BatchNorm2d(out_features)),
+            get_activation(activation)
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.base_(x)
 
 
 class Mlp(nn.Module):
@@ -104,21 +131,99 @@ class Mlp(nn.Module):
        return self.dense_(x)
 
 
+class ChannelWiseCrossAttention(nn.Module):
+
+    def __init__(
+        self,
+        in_features: int,
+        embedding_features: Optional[int]=None,
+        out_features: Optional[int]=128,
+        att_cross_mode: Optional[bool]=True,
+        agr_activation: Optional[str]="relu",
+        film_mode: Optional[bool]=False,
+        film_activation: Optional[str]="sigmoid"
+    ) -> None:
+        
+        super().__init__()
+        out_features = (in_features if out_features is None else out_features)
+        self.cross_mode = att_cross_mode
+        self.film_ag = film_mode
+        self.d = torch.sqrt(torch.tensor(out_features))
+
+        self.split_forward_ = lambda x, split_part: torch.unbind(
+            x.view(x.size(0), split_part, x.size(-1) // split_part),
+            dim=1
+        )
+        self.spatial_agregation_ = BasicConv(in_features, out_features, agr_activation)
+        if film_mode :
+            self.filtration_ = BasicLinear(
+                in_features=out_features, 
+                out_features=out_features * 2, 
+                activation=film_activation,
+                norm=False
+            )
+        if att_cross_mode:
+            self.qv_agregation_ = BasicLinear(
+                in_features=in_features, 
+                out_features=out_features * 2, 
+                activation=agr_activation,
+                norm=True
+            )
+            self.k_agregation_ = BasicLinear(
+                in_features=embedding_features, 
+                out_features=out_features, 
+                activation=agr_activation,
+                norm=True
+            )
+        
+        else:
+            self.qkv_agregation_ = BasicLinear(
+                in_features=in_features, 
+                out_features=out_features * 3, 
+                activation=agr_activation,
+                norm=True
+            )
+            
+    
+    def forward(self, x: torch.Tensor, tokens: Optional[torch.Tensor]=None) -> None:
+
+        x = F.avg_pool2d(x, kernel_size=(x.size(-1), x.size(-2))).squeeze()
+        if self.cross_mode:
+            assert (tokens is not None), ("tokens are required in cross mode")
+            x = self.qv_agregation_(x)
+            (q, v) = self.split_forward_(x, 2)
+            k = self.k_agregation_(tokens)
+        
+        else:
+            x = self.qkv_agregation_(x)
+            (q, k, v) = self.split_forward_(x, 3)
+        
+        qk = torch.sigmoid((q @ k.T) / self.d)
+        x = qk @ v
+        if self.film_ag:
+            (scale, shift) = self.split_forward_(self.filtration_(x), 2)
+            x = scale * x + shift
+        
+        return x
+            
+            
+            
+            
 class InteractionAttention(nn.Module):
     
     def __init__(
         self, 
-        input_dim: int,
+        input_features: int,
         patch_n_pr: Tuple[int, int],
+        embed_features: Optional[int]=None,
         first_dim: Optional[int]=None,
-        hiden_dim: Optional[int]=None,
-        last_dim: Optional[int]=None,
+        hiden_features: Optional[int]=None,
+        output_features: Optional[int]=None,
         pooling_size: Optional[int]=3,
-        latent_first_act_fn: Optional[str]=None,
-        latent_last_act_fn: Optional[str]=None,
-        format: Optional[str]="spatial",
-        mode: Optional[str]="self" # [self, cross]
-        
+        format: Optional[str]="spatial", # [spatial, sequence]
+        mode: Optional[str]="self", # [self, cross]
+        latent_first_activation: Optional[str]="relu",
+        latent_last_activation: Optional[str]="relu",
     ) -> None:
         
         super().__init__()
@@ -130,24 +235,28 @@ class InteractionAttention(nn.Module):
         self.N, self.d = patch_n_pr
         self.L = self.d // self.ps
 
-        self.ltf_d = (input_dim if first_dim is None else first_dim)
-        self.lti_d = (self.ltf_d if hiden_dim is None else hiden_dim)
-        self.lto_d = (self.lti_d if last_dim is None else last_dim)
+        self.ltf_d = (input_features if first_dim is None else first_dim)
+        self.lti_d = (self.ltf_d if hiden_features is None else hiden_features)
+        self.lto_d = (self.lti_d if output_features is None else output_features)
 
         if mode == "self":
             self.in_projection_ = nn.Sequential(
-                nn.Linear(input_dim, self.ltf_d * 3),
-                get_activation(latent_first_act_fn)
+                nn.Linear(input_features, self.ltf_d * 3),
+                get_activation(latent_first_activation)
             )
         
         else:
+            assert (embed_features is not None), ("""
+            in cross attention mode you must specify 
+            embed_features as one of input args
+            """)
             self.in_projection_ = nn.Sequential(
-                nn.Linear(input_dim, self.ltf_d * 2),
-                get_activation(latent_first_act_fn)
+                nn.Linear(input_features, self.ltf_d * 2),
+                get_activation(latent_first_activation)
             )
             self.v_projection_ = nn.Sequential(
-                nn.Linear(input_dim, self.ltf_d),
-                get_activation(latent_first_act_fn)
+                nn.Linear(embed_features, self.ltf_d),
+                get_activation(latent_first_activation)
             )
         
         self.latent_inter_ = nn.Sequential(
@@ -156,14 +265,13 @@ class InteractionAttention(nn.Module):
         )
         self.latent_last_ = nn.Sequential(
             nn.Linear(self.lti_d, self.lto_d),
-            get_activation(latent_last_act_fn)
+            get_activation(latent_last_activation)
         )
     
     def _project(self, x: torch.Tensor, N: int, d: int, layer: nn.Module, split_part: int=None) -> torch.Tensor:
-        x = spatial2seq(x, format="BCWH")
-        x = x.permute(0, 2, 1)
-        x = layer(x).permute(0, 2, 1)
-        x = seq2spatial(x, format="BCN", patches_n=(N, d))
+        x = spatial2seq(x, input_format="BCWH", output_format="BNC")
+        x = layer(x)
+        x = seq2spatial(x, input_format="BNC", output_format="BCWH", patches_n=(N, d))
         if split_part is not None:
             x = x.view(x.size(0), split_part, x.size(1) // split_part, N, d)
             x = x.unbind(dim=1)
@@ -180,8 +288,14 @@ class InteractionAttention(nn.Module):
         return x
 
     def forward(self, x: torch.Tensor, V: Optional[torch.Tensor]=None) -> torch.Tensor:
-        x = seq2spatial(x, patches_n=(self.N, self.d), format="BNC")
-        x = x.permute(0, -1, 1, 2)
+        if len(x.size()) == 3:
+            x = seq2spatial(
+                x=x, 
+                input_format="BNC", 
+                output_format="BCWH", 
+                patches_n=(self.N, self.d)
+            )
+
         if self.mode == "self":
             Q, K, V = self._project(
                 x=x, 
@@ -199,8 +313,6 @@ class InteractionAttention(nn.Module):
                     layer=self.in_projection_,
                     split_part=2
                 )
-                V = seq2spatial(V, patches_n=(self.N, self.d), format="BNC")
-                V = V.permute(0, -1, 1, 2)
                 V = self._project(V, self.N, self.d, self.v_projection_)
             else:
                 Q, K, V = self._project(
@@ -229,7 +341,11 @@ class InteractionAttention(nn.Module):
         o = (Qk @ (qK @ V))
         return (
             o if self.format == "spatial" 
-            else  spatial2seq(o, format="BCWH")
+            else spatial2seq(
+                x=o, 
+                input_format="BCWH", 
+                output_format="BNC"
+            )
         )
         
         
@@ -355,11 +471,11 @@ class ResidualConv(nn.Module):
         
         super().__init__()
         h_features = (features if pj_features is None else pj_features)
-        self.conv1 = build_conv_stack(features, 
+        self.conv1 = BasicConv(features, 
                                       h_features,
                                       activation, 
                                       normalize)
-        self.conv2 = build_conv_stack(h_features, 
+        self.conv2 = BasicConv(h_features, 
                                       h_features,
                                       activation, 
                                       normalize)
