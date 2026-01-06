@@ -32,29 +32,22 @@ def _gauss_kernel(kernel_size: int) -> Tuple:
     return torch.Tensor(GoP)
 
 def _sobel_kernel(kernel_size: int, return_full: Optional[bool]=False) -> Tuple:
-
     b = []
     for i in range(kernel_size):
         C = math.comb(kernel_size - 1, i)
         b.append(C)
-
-
     k = (kernel_size - 1) / 2
     _neg_d = []
     _pos_d = []
     while k >= 0:
-
         _neg_d.append(-k)
         _pos_d.append(k)
         k -= 1
-    
     d = _neg_d[:-1] + _pos_d[::-1]
     GxOp = torch.Tensor(np.outer(b, d))
     GyOp = torch.Tensor(np.outer(d, b))
-    
     if return_full:
         return (GxOp @ GyOp)
-
     return (GxOp, GyOp)
 
 class SSIM(nn.Module):

@@ -10,9 +10,26 @@ __DATASETS__ = {
 
 
 @dataclass
+class AttributesCollection:
+
+    #mip nerf dataset attributes
+    path: str
+    target_size: Tuple[int, int]=None
+    scene_type: str="bicycle"
+    images_scale: int=1
+    pts_partition_size: int=1000
+    pts_partitions_n: int=40
+    pts_shuffle: bool=False
+    scene_scale: float=1.0
+    cameras_scale: float=1.0
+    normal_knn: int=11
+    normal_radii: float=0.1
+
+
+@dataclass
 class DataLoaderConfig:
     name: Optional[str]=None
-    params: Optional[DictConfig]=None
+    params: AttributesCollection=AttributesCollection
     batch_size: Optional[int]=32
     shuffle: Optional[bool]=False
     num_workers: Optional[int]=0
@@ -32,21 +49,26 @@ class NeuroSplatDataModule(LightningDataModule):
         self.cfg = parse_structured(self.NeuroSplatDataModuleConfig, cfg)
         print(self.cfg.train)
     
+    def _readset(self, set_cfg: DataLoaderConfig):
+        splitset = __DATASETS__[set_cfg.name]
+        splitset = splitset(**{
+            key: value 
+            for (key, value) in vars(set_cfg.params)["__annotations__"].items() 
+            if key in vars(splitset.Config)["__annotations__"]
+        })
+        return splitset
+    
     def setup(self, stage: str) -> None:
         
         if stage == "fit":
             assert (self.cfg.train is not None), ("train data split is required in data module")
-            train_cfg = self.cfg.train
-            self.trainset = __DATASETS__[train_cfg.name](**train_cfg.params)
+            self.trainset = self._readset(self.cfg.train)
             if (self.cfg.validation is not None):
                 print("LOADING THE VALIDATION SET")
-                val_cfg = self.cfg.validation
-                self.valset = __DATASETS__[val_cfg.name](**val_cfg.params)
-
+                self.valset = self._readset(self.cfg.validation)
         if stage == "test":
             if (self.cfg.test is not None):
-                test_cfg = self.cfg.test
-                self.testest = __DATASETS__[test_cfg.name](**test_cfg.params)
+                self.testset = self._readset(self.cfg.test)
             
 
     def train_dataloader(self) -> DataLoader:

@@ -8,6 +8,9 @@ import rerun.blueprint as rrb
 import random as rd
 import matplotlib.pyplot as plt
 
+from rerun import Quaternion
+from dataclasses import dataclass
+from pydantic import BaseModel
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
 from nerfstudio.data.utils.colmap_parsing_utils import (
@@ -22,10 +25,10 @@ from torchvision.transforms import (Compose,
                                     Resize, Lambda)
 from torchvision.transforms.functional import InterpolationMode
 from scipy.spatial.transform import Rotation as R
-from typing import (Optional, Tuple, Dict, Any)
-from rerun import Quaternion
+from typing import (Optional, Tuple, Dict, Any, List)
 from open3d.geometry import (PointCloud, KDTreeSearchParamHybrid as knn_sr)
 from open3d.utility import Vector3dVector as vec
+from ..utils.graphics_utils import (CameraInfo, Rmat2quat)
 
 
 _INTERPOLATION_TYPES_ = {
@@ -37,42 +40,43 @@ _INTERPOLATION_TYPES_ = {
     "lanczos": InterpolationMode.LANCZOS
 }
 class MipNerfDataset(Dataset):
-
-    def __init__(
-        self,
-        path: str,
-        target_size: Optional[Tuple[int, int]]=None,
-        scene_type: Optional[str]="bicycle",
-        images_scale: Optional[int]=1,
-        pts_partition_size: Optional[int]=1000,
-        pts_partitions_n: Optional[int]=40,
-        pts_shuffle: Optional[bool]=False,
-        scene_scale: Optional[float]=1.0,
-        cameras_scale: Optional[float]=1.0,
-        normal_knn: Optional[int]=11,
+    
+    class Config(BaseModel):
+        path: str
+        target_size: Optional[Tuple[int, int]]=(224, 224)
+        scene_type: Optional[str]="bicycle"
+        images_scale: Optional[int]=1
+        pts_partition_size: Optional[int]=1000
+        pts_partitions_n: Optional[int]=40
+        pts_shuffle: Optional[bool]=False
+        scene_scale: Optional[float]=1.0
+        cameras_scale: Optional[float]=1.0
+        normal_knn: Optional[int]=11
         normal_radii: Optional[float]=0.1
-    ) -> None:
+
+    def __init__(self, cfg: Config) -> None:
         
         super().__init__()
-        self.scene_scale = scene_scale
-        self.cameras_scale = cameras_scale
-        assert scene_type in os.listdir(path), (f"""
+        self.cfg = cfg
+        self.scene_scale = self.cfg.scene_scale
+        self.cameras_scale = self.cfg.cameras_scale
+        assert self.cfg.scene_type in os.listdir(self.cfg.path), (f"""
         scene type must one of folders in data_path.
-        scene_type: {scene_type}, data_path containment: {os.listdir(path)}
+        scene_type: {self.cfg.scene_type}, data_path containment: {os.listdir(path)}
         """)
-        path = os.path.join(path, scene_type)
+        path = os.path.join(self.cfg.path, self.cfg.scene_type)
         
         
-        assert (images_scale == 1) or (f"images_{images_scale}" in os.listdir(path)), (f"""
+        assert (self.cfg.images_scale == 1) or (f"images_{self.cfg.images_scale}" in os.listdir(path)), (f"""
         Image with provided scale factor couldn'e be found in data_path folder
-        provided images_scale: {images_scale}, scene_path containment: {os.listdir(path)}
+        provided images_scale: {self.cfg.images_scale}, scene_path containment: {os.listdir(path)}
         """)
-        images_f = (f"images_{images_scale}" if images_scale != 1 else "images")
+        images_f = (f"images_{self.cfg.images_scale}" if self.cfg.images_scale != 1 else "images")
         images_path = os.path.join(path, images_f)
         self.imgs_transform = Compose([
             Lambda(lambda img_f: Image.open(img_f)),
             PILToTensor(),
-            (Resize(target_size) if target_size is not None else nn.Identity()),
+            (Resize(self.cfg.target_size) if self.cfg.target_size is not None else nn.Identity()),
             Lambda(lambda img: ((img / 255.0).to(torch.float32) if img.max() > 1.0 else img))
         ])
 
@@ -99,14 +103,14 @@ class MipNerfDataset(Dataset):
         self._parse_points_and_cams(
             path=pts_f_bin,
             images_path=images_path,
-            parts_n=pts_partitions_n,
-            shuffle=pts_shuffle,
-            part_size=pts_partition_size,
+            parts_n=self.cfg.pts_partitions_n,
+            shuffle=self.cfg.pts_shuffle,
+            part_size=self.cfg.pts_partition_size,
             imgs_annots=imgs_annots,
             cams_params=cams_params,
-            normal_knn=normal_knn,
-            normal_radii=normal_radii,
-            t_img_s=target_size
+            normal_knn=self.cfg.normal_knn,
+            normal_radii=self.cfg.normal_radii,
+            t_img_s=self.cfg.target_size
         )
     
     @property
@@ -115,9 +119,9 @@ class MipNerfDataset(Dataset):
     
     @property
     def cameras_extent(self) -> float:
-        cam_dists = torch.norm(self.viewmats[..., :3, 3], dim=-1)
-        max_xyz_t = self.viewmats[torch.argmax(cam_dists), :3, 3]
-        min_xyz_t = self.viewmats[torch.argmin(cam_dists), :3, 3]
+        cam_dists = torch.norm(self.translations, dim=-1)
+        max_xyz_t = self.translations[torch.argmax(cam_dists), :]
+        min_xyz_t = self.translations[torch.argmin(cam_dists), :]
         return torch.norm(max_xyz_t - min_xyz_t)
     
     @property
@@ -131,7 +135,7 @@ class MipNerfDataset(Dataset):
             "viewpointsN": self.imgs.size(0)
         }
     
-    def data_preview(self, origin: Optional[str]="origin_mip-nerf"):
+    def data_preview(self, origin: str="origin_mip-nerf"):
 
         rr.init(origin, spawn=True)
         pts_attrs = self.points_attrs
@@ -143,14 +147,19 @@ class MipNerfDataset(Dataset):
                 radii=0.008
             )
         )
-        for idx, (rgb, viewmat, K) in enumerate(zip(self.imgs, self.viewmats, self.Ks)):
+        for idx, (rgb, Quat, Translation, K) in enumerate(zip(
+            self.imgs, 
+            self.quats, 
+            self.translations, 
+            self.Ks
+        )):
             if idx == 0:
                 print(K)
             rr.log(
                 f"{origin}/Frame_{idx}",
                 rr.Transform3D(
-                    translation=viewmat[:3, 3],
-                    mat3x3=viewmat[:3, :3]
+                    translation=Translation,
+                    quaternion=Quaternion(xyzw=Quat)
                 ),
                 rr.Pinhole(image_from_camera=K),
                 rr.Image(rgb.permute(1, 2, 0))
@@ -214,7 +223,8 @@ class MipNerfDataset(Dataset):
         
         imgs_N = len(imgs_ids)
         self.Ks = np.zeros((imgs_N, 3, 3))
-        self.viewmats = np.zeros((imgs_N, 4, 4))
+        self.quats = np.zeros((imgs_N, 4))
+        self.translations = np.zeros((imgs_N, 3))
         self.imgs = np.zeros((imgs_N, 3, t_img_s[0], t_img_s[1]))
         with tqdm(
             total=len(imgs_ids),
@@ -232,36 +242,23 @@ class MipNerfDataset(Dataset):
                     [0.0, camK[1], camK[-2]],
                     [0.0, 0.0, 1.0]
                 ])
-                viewmat = np.eye(4)
-                Rmat = self.poses[img_annot.id - 1, :3, :3]
-                # Rotx = R.from_rotvec(np.array([1.0, 0.0, 0.0]) * -180.0, degrees=True).as_matrix()
-                # Roty = R.from_rotvec(np.array([0.0, 1.0, 0.0]) * 180.0, degrees=True).as_matrix()
-                Rot = R.from_euler("z", -90, degrees=True).as_matrix()
-                ProjMat = np.array([
-                    [1.0, 0.0, 0.0, 0.0],
-                    [0.0, -1.0, 0.0, 0.0],
-                    [0.0, 0.0, -1.0, 0.0],
-                    [0.0, 0.0, 0.0, 1.0]
-                ])
+                Quat = Rmat2quat(self.poses[img_annot.id - 1, :3, :3], "xyzw")
                 Translation = self.poses[img_annot.id - 1, :3, 3]
-                
-                viewmat[:3, :3] = Rot @ Rmat 
-                viewmat[:3, 3] = (Translation * self.cameras_scale)
-                viewmat = ProjMat @ viewmat
-        
 
                 try:
                     self.Ks[idx - 1, ...] = K
-                    self.viewmats[idx - 1, ...] = viewmat
+                    self.quats[idx - 1, :] = Quat
+                    self.translations[idx - 1, :] = Translation
                     img = self.imgs_transform(os.path.join(images_path, img_annot.name))
-                    self.imgs[idx, ...] = img
+                    self.imgs[idx - 1, ...] = img
                     annots_bar.update(1)
                 
                 except:
                     pass
         
         self.imgs = torch.Tensor(self.imgs)
-        self.viewmats = torch.Tensor(self.viewmats)
+        self.quats = torch.Tensor(self.quats)
+        self.translations = torch.Tensor(self.translations)
         self.Ks = torch.Tensor(self.Ks)
         
     def __len__(self) -> int:
@@ -269,34 +266,54 @@ class MipNerfDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         return {
-            "gt-rgb": self.imgs[idx],
-            "viewmats": self.viewmats[idx],
-            "Ks": self.Ks[idx]
+            "gs-img": self.imgs[idx, ...],
+            "quat": self.quats[idx, :],
+            "translation": self.translations[idx, :],
+            "K": self.Ks[idx, ...],
         }
 
+def get_cameras_from_batch(
+    resolution: Tuple[int, int], 
+    batch: Dict[str, Any]
+) -> List[CameraInfo]:
+    cameras = []
+    B = batch["gs-img"].size(0)
+    for idx in range(B):
+        camera = CameraInfo(
+            resolution=resolution,
+            Quat=batch["quat"][idx, :],
+            Translation=batch["translation"][idx, :],
+            base_img=batch["gs-img"][idx, ...],
+            K=batch["K"][idx, ...]
+        )
+        cameras.append(camera)
+    return cameras
             
 
 
 
-# if __name__ == "__main__":
+if __name__ == "__main__":
     
 #     from scipy.spatial.transform import Rotation as R
-#     path = "/home/ram/Downloads/360_v2"
-#     dataset = MipNerfDataset(
-#         path=path,
-#         target_size=(112, 224),
-#         normal_knn=30,
-#         scene_scale=1.0,
-#         normal_radii=0.1,
-#         scene_type="counter",
-#         pts_partition_size=10000,
-#         pts_partitions_n=10
-#     )
-#     loader = DataLoader(
-#         dataset=dataset,
-#         batch_size=1,
-#         shuffle=False
-#     )
+    path = "/home/ram/Downloads/360_v2"
+    cfg = MipNerfDataset.Config(
+        path=path,
+        target_size=(112, 224),
+        normal_knn=30,
+        scene_scale=1.0,
+        normal_radii=0.1,
+        scene_type="counter",
+        pts_partition_size=10000,
+        pts_partitions_n=10
+    )
+    dataset = MipNerfDataset(cfg)
+    loader = DataLoader(
+        dataset=dataset,
+        batch_size=1,
+        shuffle=False
+    )
+    sample = next(iter(loader))
+    print(sample)
 #     sample = next(iter(loader))
 #     print(sample["gt-rgb"].size(), sample["viewmats"].size(), sample["Ks"].size())
 #     print(sample["Ks"], sample["viewmats"])
