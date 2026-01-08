@@ -38,7 +38,6 @@ class RenderingConfig(BaseModel):
     zfar_plane: Optional[float]=100.0
     scaling_trashhold: Optional[float]=20.0
     debug: Optional[bool]=False
-    antialiasing: Optional[bool]=False
     
 
 class OptimizationConfig(BaseModel):

@@ -155,7 +155,7 @@ def render(
 if __name__ == "__main__":
 
     from torch.utils.data import DataLoader
-    from ..datasets.mip_nerf import (MipNerfDataset, get_cameras_from_batch)
+    from ..datasets.data_loaders import (MipNerfDataset, get_cameras_from_batch)
     from ..configs.configs import (
         RenderingConfig,
         OptimizationConfig

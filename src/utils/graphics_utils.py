@@ -8,169 +8,12 @@ from typing import (
     Union, 
     Optional, 
     Tuple, 
-    NamedTuple
+    NamedTuple,
+    List
 )
 from torch.nn.functional import interpolate
 from torchvision.transforms import PILToTensor, Resize, Compose
 from torchvision.transforms.functional import pil_to_tensor
-
-
-
-COLOR_PALETTE_ = [
-0, 0, 0, 120, 120, 120, 180, 120, 120, 6, 230, 230, 80, 50, 50, 4, 200, 3, 120, 120, 80, 140, 140, 140, 204, 5, 255, 230, 230, 230, 4, 250, 7, 224, 5, 255, 235, 255, 7, 150, 5, 61, 120, 120, 70, 
-8, 255, 51, 255, 6, 82, 143, 255, 140, 204, 255, 4, 255, 51, 7, 204, 70, 3, 0, 102, 200, 61, 230, 250, 255, 6, 51, 11, 102, 255, 255, 7, 71, 255, 9, 224, 9, 7, 230, 220, 220, 220, 255, 9, 92, 
-112, 9, 255, 8, 255, 214, 7, 255, 224, 255, 184, 6, 10, 255, 71, 255, 41, 10, 7, 255, 255, 224, 255, 8, 102, 8, 255, 255, 61, 6, 255, 194, 7, 255, 122, 8, 0, 255, 20, 255, 8, 41, 255, 5, 153, 
-6, 51, 255, 235, 12, 255, 160, 150, 20, 0, 163, 255, 140, 140, 140, 250, 10, 15, 20, 255, 0, 31, 255, 0, 255, 31, 0, 255, 224, 0, 153, 255, 0, 0, 0, 255, 255, 71, 0, 0, 235, 255, 0, 173, 255, 
-31, 0, 255, 11, 200, 200, 255, 82, 0, 0, 255, 245, 0, 61, 255, 0, 255, 112, 0, 255, 133, 255, 0, 0, 255, 163, 0, 255, 102, 0, 194, 255, 0, 0, 143, 255, 51, 255, 0, 0, 82, 255, 0, 255, 41, 
-0, 255, 173, 10, 0, 255, 173, 255, 0, 0, 255, 153, 255, 92, 0, 255, 0, 255, 255, 0, 245, 255, 0, 102, 255, 173, 0, 255, 0, 20, 255, 184, 184, 0, 31, 255, 0, 255, 61, 0, 71, 255, 255, 0, 204, 
-0, 255, 194, 0, 255, 82, 0, 10, 255, 0, 112, 255, 51, 0, 255, 0, 194, 255, 0, 122, 255, 0, 255, 163, 255, 153, 0, 0, 255, 10, 255, 112, 0, 143, 255, 0, 82, 0, 255, 163, 255, 0, 255, 235, 0, 
-8, 184, 170, 133, 0, 255, 0, 255, 92, 184, 0, 255, 255, 0, 31, 0, 184, 255, 0, 214, 255, 255, 0, 112, 92, 255, 0, 0, 224, 255, 112, 224, 255, 70, 184, 160, 163, 0, 255, 153, 0, 255, 71, 255, 0, 
-255, 0, 163, 255, 204, 0, 255, 0, 143, 0, 255, 235, 133, 255, 0, 255, 0, 235, 245, 0, 255, 255, 0, 122, 255, 245, 0, 10, 190, 212, 214, 255, 0, 0, 204, 255, 20, 0, 255, 255, 255, 0, 0, 153, 255, 
-0, 41, 255, 0, 255, 204, 41, 0, 255, 41, 255, 0, 173, 0, 255, 0, 245, 255, 71, 0, 255, 122, 0, 255, 0, 255, 184, 0, 92, 255, 184, 255, 0, 0, 133, 255, 255, 214, 0, 25, 194, 194, 102, 255, 0, 
-92, 0, 255
-]
-
-@dataclass
-class CameraInfo:
-    resolution: Tuple[int]=None
-    fovx: float=None
-    fovy: float=None
-    tanfovx: float=None
-    tanfovy: float=None
-    znear: float=0.01
-    zfar: float=100.0
-    Translation: Union[np.ndarray, torch.Tensor]=None
-    Quat: Optional[Union[np.ndarray, torch.Tensor]]=None
-    Rmat: Optional[Union[np.ndarray, torch.Tensor]]=None
-    viewmatrix: Optional[Union[np.ndarray, torch.Tensor]]=None
-    projmatrix: Optional[Union[np.ndarray, torch.Tensor]]=None
-    K: Optional[Union[np.ndarray, torch.Tensor]]=None
-    base_img: Optional[Union[np.ndarray, torch.Tensor]]=None
-    depth_mask: Optional[Union[np.ndarray, torch.Tensor]]=None
-    segmentation_masks: Optional[Union[np.ndarray, torch.Tensor]]=None
-    camera_center: Optional[torch.Tensor]=None
-
-
-    def __post_init__(self) -> None:
-
-        if self.viewmatrix is None:
-            assert (self.Quat is not None and self.Translation is not None), ("cannont initialize viewmatrix for camera")
-            R = quat2Rmat(self.Quat, "xyzw")
-            self.Rmat = torch.Tensor(R)
-            # self.viewmatrix = torch.Tensor(getWorld2View2(R, self.Translation))
-            self.viewmatrix = torch.eye(4)
-            self.viewmatrix[:3, :3] = self.Rmat
-            self.viewmatrix[:3, :3] = self.Translation
-        
-        if self.viewmatrix is not None:
-            self.camera_center = self.viewmatrix[3, :3]
-        
-        if (self.K is not None 
-            and self.resolution is not None):
-            self.projmatrix = getProjectionMatrix2(
-                znear=self.znear,
-                zfar=self.zfar,
-                K=self.K,
-                W=self.resolution[0], H=self.resolution[1]
-            ).transpose(0, 1)
-        
-        if ((self.fovx is None
-            or self.fovy is None)
-            and self.K is not None):
-            self.fovx = 2.0 * math.atan2(self.resolution[0] / 2.0, self.K[0, 0])
-            self.fovy = 2.0 * math.atan2(self.resolution[1] / 2.0, self.K[1, 1])
-            
-
-        if (self.tanfovx is None 
-            or self.tanfovy is None):
-            if (self.fovx is not None
-                and self.fovy is not None):
-                self.tanfovx = math.tan(self.fovx / 2)
-                self.tanfovy = math.tan(self.fovy / 2)
-
-    def to(self, arg: str) -> None:
-        fields_to_convert_ = ["translation", 
-                              "quat", "Rmat", "viewmatrix", "K",
-                              "base_img", "depth_mask", "segmentation_masks"]
-        for field in fields(self):
-            f_name = field.name
-            value = getattr(self, f_name)
-            if value is not None:
-                if f_name in fields_to_convert_:
-                    if arg in ["pt", "tensor"]:
-                        if isinstance(value, np.ndarray):
-                            setattr(self, f_name, torch.Tensor(value))
-                    elif arg in ["np", "array"]:
-                        if isinstance(value, torch.Tensor):
-                            setattr(self, f_name, value.detach().cpu().numpy())
-                    elif arg in ["cpu", "cuda"]:
-                        print(f_name)
-                        assert isinstance(value, torch.Tensor), (f"can only convert pytorch tensors to {arg}!!!")
-                        setattr(self, f_name, value.to(arg))
-                    else:
-                        raise ValueError("unrecognized arg value !!!")
-    
-    def get_masks(self, cls_idx: list, colorized: bool=True) -> Union[np.ndarray, torch.Tensor]:
-        if self.segmentation_masks is not None:
-            if len(cls_idx) != 1:
-                masks = torch.stack([
-                    (
-                        (self.segmentation_masks[..., idx] > 0.5) * idx
-                        if colorized
-                        else self.segmentation_masks[..., idx]
-                    )  for idx in cls_idx
-                ], dim=-1)
-                return masks
-            else:
-                mask = (
-                    (self.segmentation_masks[..., cls_idx[0]] > 0.5) * cls_idx[0]
-                    if colorized
-                    else self.segmentation_masks[..., cls_idx[0]]
-                )
-                return mask
-        else:
-            raise ValueError("specify segmentation masks !!!")
-    
-    def get_masked_img(self, cls_idx: list) -> Union[np.ndarray, torch.Tensor]:
-        masks = self.get_masks(cls_idx)
-        masked_img = apply_masks(self.base_img, masks)
-        return masked_img
-
-    def set_projection_bounds(self, near: float, far: float) -> None:
-        self.znear = near
-        self.zfar = far
-        self.projmatrix = getProjectionMatrix2(
-            znear=self.znear,
-            zfar=self.zfar,
-            K=self.K,
-            W=self.resolution[0], H=self.resolution[1]
-        ).transpose(0, 1)
-    
-
-
-def apply_masks(
-    gt_img: torch.Tensor,
-    masks: torch.Tensor,
-    alpha: Optional[float]=0.5,
-    format: Optional[str]="WHC"
-): 
-    if format == "CWH":
-        gt_img = gt_img.permute(2, 0, 1)
-        
-
-    gt_img = (gt_img.detach().cpu().numpy() * 255.0).astype("uint8")
-    gt_img = Image.fromarray(gt_img)
-
-    masks = masks.detach().cpu().numpy()
-    masks = (np.argmax(masks, axis=-1) if masks.ndim == 3 else masks).astype("uint8")
-    masks = Image.fromarray(masks)
-    masks.putpalette(COLOR_PALETTE_)
-    
-    masked_img = Image.blend(gt_img, masks.convert("RGB"), alpha)
-    masked_img = pil_to_tensor(masked_img)
-    masked_img = (masked_img / 255.0).permute(1, 2, 0)
-
-    return (masked_img if format == "WHC" else masked_img.permute(1, 2, 0))
 
 
 def quat2Rmat(q: Union[torch.Tensor, np.ndarray], in_format="xyzw") -> np.ndarray:
@@ -308,59 +151,127 @@ def getProjectionMatrix2(znear, zfar, K, W, H):
 
     return P
 
-def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
-    Rt = np.zeros((4, 4))
-    Rt[:3, :3] = R.transpose()
-    Rt[:3, 3] = t
-    Rt[3, 3] = 1.0
+def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0, w2c: bool=False):
 
-    C2W = np.linalg.inv(Rt)
-    cam_center = C2W[:3, 3]
-    cam_center = (cam_center + translate) * scale
-    C2W[:3, 3] = cam_center
-    Rt = np.linalg.inv(C2W)
-    return np.float32(Rt)
+    Rt = np.eye(4)
+    Rt[:3, :3] = R
+    Rt[:3, 3] = (t + translate) * scale
+    return Rt
+    # Rt[:3, :3] = (R if not w2c else R.T)
+    # Rt[:3, 3] = (t if not w2c else -(R.T @ t))
 
-
-if __name__ == "__main__":
-
-    test = np.random.rand(10000, 3, 3)
-    quats = Rmat2quat(test, "xyzw")
-    print(quats.shape)
-
-
-    import matplotlib.pyplot as plt
-    from transformers import (DPTImageProcessor, DPTForSemanticSegmentation)
-    img = "/media/ram/T71/360_v2/garden/images_8/DSC07965.JPG"
-    img = Image.open(img)
-    tf = Compose([
-        PILToTensor(),
-        Resize((224, 224))
-    ])
-    img = tf(img)
+    # cam_center = (Rt[:3, 3] + translate) * scale
+    # Rt[:3, 3] = cam_center
+    # Rt = ColmapNnerf_convertion(Rt)
+    # W2C = np.linalg.inv(Rt)
+    # return W2C
     
-    model_v = "Intel/dpt-large-ade"
-    preprocessor = DPTImageProcessor.from_pretrained(model_v)
-    model = DPTForSemanticSegmentation.from_pretrained(model_v)
 
-    img_prep = preprocessor(img, return_tensors="pt")
-    preds = model(**img_prep).logits
-    preds = interpolate(preds, size=(224, 224)).squeeze().permute(1, 2, 0)
+def transform_imgTensor(img: Union[np.ndarray, torch.Tensor], transform_order: str):
+    axes_idx_map = {
+        "WHC->CWH": (2, 0, 1),
+        "WHC->CHW": (2, 1, 0),
+        "WHC->HWC": (1, 0, 2),
+        "CWH->WHC": (1, 2, 0),
+        "CWH->HWC": (2, 1, 0),
+        "CWH->CHW": (0, 2, 1),
+        "CHW->WHC": (2, 0, 1),
+        "CHW->CWH": (0, 2, 1),
+        "CHW->HWC": (1, 2, 0),
+        "HWC->WHC": (1, 0, 2),
+        "HWC->CWH": (2, 0, 1),
+        "HWC->CHW": (2, 1, 0),
+        "WHC->WHC": (0, 1, 2),
+        "CWH->CWH": (0, 1, 2),
+        "CHW->CHW": (0, 1, 2),
+        "HWC->HWC": (0, 1, 2),
+    }
+    permute_order = axes_idx_map[transform_order]
+    if img.ndim > 3:
+        dims_df = img.ndim - 3
+        first_axes = list(range(dims_df))
+        last_axes = [axis + dims_df for axis in permute_order]
+        permute_order = tuple(first_axes + last_axes)
+        print(permute_order)
+
+    if transform_order not in axes_idx_map:
+        raise ValueError(f"unrecognized convert type: {transform_order:}!!!")
     
-    camera = CameraInfo(
-        base_img=img.permute(1, 2, 0),
-        segmentation_masks=preds
+    return (
+        img.transpose(permute_order) 
+        if isinstance(img, np.ndarray) 
+        else img.permute(permute_order)
     )
-    camera.to("pt")
-    masks = camera.get_masks([8, 19, 3], colorized=False)
-    masked_img = camera.get_masked_img([8, 19, 3])
-    _, axis = plt.subplots(ncols=4)
-    axis[0].imshow(masked_img)
-    axis[1].imshow(masks[..., 0].detach())
-    axis[2].imshow(masks[..., 1].detach())
-    axis[3].imshow(masks[..., 2].detach())
-    plt.show()
 
+def ColmapNnerf_convertion(
+    input: Union[torch.Tensor, np.ndarray], 
+    in_type: str, 
+    in_mode: Optional[str]=None,
+):
 
+    convertion_Mat = np.eye(4)
+    convertion_Mat[1, :] *= -1
+    convertion_Mat[2, :] *= -1
+
+    if in_type in ["points", "points3D", "pts"]:
+        result = input @ convertion_Mat[:3, :3]
+    elif in_type in ["view", "viewmat", "viewmatrix"]:
+        if in_mode is not None:
+            if in_mode == "c2w":
+                result = convertion_Mat @ input
+            elif in_mode == "w2c":
+                input = convertion_Mat @ input
+                result = np.linalg.inv(input) @ convertion_Mat
+                # inv_conv = np.linalg.inv(convertion_Mat)
+                # result = convertion_Mat @ c2w @ convertion_Mat
+        else:
+            result = convertion_Mat @ input
     
+    return result
+
+def C2W_pinhole(
+    uv: Union[np.ndarray, torch.Tensor],
+    Fx: float, Fy: float, 
+    Cx: float, Cy:float
+):
     
+    tensor_type = "np"
+    if isinstance(uv, torch.Tensor):
+        tensor_type = "pt"
+        uv = uv.detach().cpu().numpy()
+
+    batched = True
+    if uv.ndim == 1:
+        batched = False
+        uv = uv.reshape(1, 2)
+
+    mx = (uv[:, 0] - Cx) / Fx
+    my = (uv[:, 1] - Cy) / Fy
+    Dir_xyz = np.concatenate([mx, my, np.ones_like(mx)], dim=-1)
+    Dir_xyz = Dir_xyz / np.linalg.norm(Dir_xyz, dim=-1, keepdims=True)
+    Dir_xyz = (Dir_xyz if batched else Dir_xyz[0])
+    Dir_xyz = (Dir_xyz if tensor_type != "pt" else torch.Tensor(Dir_xyz))
+    return Dir_xyz
+
+def W2C_pinhole(
+    xyz: Union[np.ndarray, torch.Tensor],
+    Fx: float, Fy: float,
+    Cx: float, Cy: float
+):
+    tensor_type = "np"
+    if isinstance(xyz, torch.Tensor):
+        tensor_type = "pt"
+        xyz = xyz.detach().cpu().numpy()
+    
+    batched = True
+    if xyz.ndim == 1:
+        batched = False
+        xyz = xyz.reshape(1, 3)
+        
+    u = (Fx / xyz[:, 2]) * xyz[:, 0] + Cx 
+    v = (Fy / xyz[:, 2]) * xyz[:, 1] + Cy 
+    UV = np.concatenate([u, v], dim=-1)
+    UV = (UV if batched else UV[0])
+    UV = (UV if tensor_type != "pt" else torch.Tensor(UV))
+    return UV
+

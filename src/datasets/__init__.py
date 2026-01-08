@@ -1,6 +1,6 @@
 from lightning import LightningDataModule
 from torch.utils.data import DataLoader
-from .mip_nerf import MipNerfDataset
+from .data_loaders import MipNerfDataset
 from ..configs.configs import *
 
 
