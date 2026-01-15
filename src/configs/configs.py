@@ -27,6 +27,7 @@ class LogingConfig(BaseModel):
     log_per_step: Optional[int]=1000
     steps2log: Optional[List[int]]=None
     n_views2log: Optional[int]=2
+    renderer: Optional[str]="gs-splat", #[default, gs-splat]
 
 class RenderingConfig(BaseModel):
     resolution: Optional[Tuple[int, int]]=(224, 224)
@@ -68,12 +69,7 @@ class OptimizationConfig(BaseModel):
     device: Optional[str]="cuda"
     segmentation: Optional[bool]=False
 
-class TrainingConfig(BaseModel):
-    losses: Optional[List[str]]=Field(default_factory=[
-        "d-ssim",
-        "mse",
-        "l1"
-    ])
+
     
 
 def save_cfg(cfg, path: str):

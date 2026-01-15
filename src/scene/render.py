@@ -4,13 +4,83 @@ from typing import Optional
 from contextlib import nullcontext
 from sklearn.decomposition import PCA
 from .gaussian_model import GaussianModel
-from ..utils.graphics_utils import CameraInfo
+from .scene_objects import CameraInfo
 from ..utils.sh_utils import eval_sh
 from diff_gaussian_rasterization import (GaussianRasterizationSettings, GaussianRasterizer)
+from gsplat import rasterization
+from ..types import *
+from dataclasses import fields
 
 
 
-def render(
+def gsplat_render(
+    viewpoints_cameras: Union[CameraInfo, List[CameraInfo]],
+    gs: GaussianModel,
+    features2render: Optional[torch.Tensor]=None,
+    eval_shs: Optional[bool]=True
+) -> Dict[str, Any]:
+    
+    if isinstance(viewpoints_cameras, list):
+
+        B = len(viewpoints_cameras)
+        (width, height) = (viewpoints_cameras[0].width, viewpoints_cameras[0].height)
+        (far, near) = (viewpoints_cameras[0].far, viewpoints_cameras[1].near)
+        viewmatrises = torch.stack([cam.cam2world for cam in viewpoints_cameras], dim=0)
+        K = torch.stack([cam.K for cam in viewpoints_cameras], dim=0)
+        
+        xyz = gs.get_xyz
+        opacities = gs.get_opacity.squeeze()
+        scales = gs.get_scaling
+        quats = gs.get_rotation
+        if features2render is not None:
+            colors = features2render
+        elif eval_shs:
+            features = gs.get_features.repeat(B, 1, 1, 1).transpose(-1, -2)
+            dirs = torch.stack([(view[:3, 3].repeat(gs.N, 1) - xyz) for view in viewmatrises], dim=0)
+            dirs_norm = dirs / torch.linalg.norm(dirs, keepdim=True)
+            sh_deggre = gs.max_sh_degree
+            print(features.size())
+            colors = eval_sh(sh_deggre, features, dirs_norm)
+            print(colors.size())
+        else:
+            colors = gs.get_features_dc.squeeze()
+            print(colors.size())
+        
+        print(f"""
+            opacities: {opacities.min(), opacities.mean(), opacities.max()},
+            colors: {colors.min(), colors.mean(), colors.max()}
+        """)
+        
+        (render, alphas, meta) = rasterization(
+            means=xyz,
+            quats=quats,
+            scales=scales,
+            opacities=opacities,
+            colors=colors,
+            Ks=K,
+            viewmats=viewmatrises,
+            width=width, height=height,
+            far_plane=far, near_plane=near,
+        )
+        radii = meta["radii"]
+        print(radii.size())
+        radii = torch.max(radii, dim=0).values
+        print(radii.size())
+        return {
+            "render_rgb": render.permute(0, 3, 1, 2),
+            "render_depth": alphas.permute(0, 3, 1, 2),
+            "radii": meta["radii"],
+            "visibility_filter": (radii > 0.0),
+            "screen_space_points": torch.zeros_like(xyz)
+        }
+        
+        
+
+        
+    
+    
+    
+def default_render(
     viewpoint_camera: CameraInfo, 
     gs: GaussianModel, 
     pipe, 
@@ -20,7 +90,7 @@ def render(
     override_color: Optional[torch.Tensor]=None,
     render_features: Optional[torch.Tensor]=None,
     use_trained_exp: bool=False
-):
+) -> Dict[str, Any]:
     """
     Render the scene. 
     
