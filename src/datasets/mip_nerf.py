@@ -43,8 +43,6 @@ from tqdm import tqdm
 @dataclass
 class MipNerfDatasetConfig(BaseIterableDatasetConfig):
     images_split: Optional[str]="images"
-    near: Optional[float]=0.1
-    far: Optional[float]=100.0
     apply_worldspace_norm: Optional[bool]=True
 
 @register_dataset("mip-nerf360")
@@ -53,6 +51,7 @@ class MipNerfDataset(BaseIterableDataset):
     def __init__(self, config: MipNerfDatasetConfig) -> None:        
         self.cfg = config
         super().__init__(self.cfg)
+        self.load_data()
         if self.cfg.apply_worldspace_norm:
             self.normalize_world_space()
     
@@ -91,7 +90,11 @@ class MipNerfDataset(BaseIterableDataset):
             for cam in self.viewpoints_pkg["cameras"].values()
         ], dim=0).cpu().numpy()
         return get_camera_extent(camcents)
-        
+    
+    def load_data(self):
+        self.load_points3D()
+        self.load_cameras()
+
     def load_points3D(self) -> PointCloudInfo:
         
         points_f = os.path.join(self.cfg.source, "sparse/0/points3D.bin")
@@ -109,32 +112,13 @@ class MipNerfDataset(BaseIterableDataset):
             if points_rgb.max() <= 1.0 
             else points_rgb.astype(np.float32) / 255.0
         )
-
-        pcd = PointCloud()
-        pcd.points = vec3d(points_xyz)
-        pcd.colors = vec3d(points_rgb)
-        pcd.remove_radius_outlier(
-            self.cfg.outlier_knn_trashhold, 
-            self.cfg.outlier_radii_trashhold
-        )
-        pcd.estimate_normals(search_param=kdtree_hyb(
-            self.cfg.normals_searching_rad,
-            self.cfg.normals_searching_nns
-        ))
-        # points_xyz = ColmapNnerf_convertion(np.asarray(pcd.points), "pts", permute_order=(0, 1))
-        points_xyz = np.asarray(pcd.points)
-        points_xyz = points_xyz * self.cfg.points_scale
-        points_rgb = np.asarray(pcd.colors)
-        points_normals = np.asarray(pcd.normals)
-
-        pts = PointCloudInfo(
+        (points_xyz, points_normals) = self.preprocess_point_cloud(points_xyz)
+        self.point_cloud = PointCloudInfo(
             xyz=points_xyz,
             rgb=points_rgb,
             normals=points_normals,
         ).to(self.cfg.device)
         print("[POINT CLOUD DATA WAS LOADED WITH SUCCES!!]")
-        print(pts)
-        return pts
     
     def load_cameras(self) -> Dict[int, Any]:
 

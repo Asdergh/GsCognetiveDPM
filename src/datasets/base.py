@@ -4,6 +4,11 @@ import os
 from torch.utils.data import IterableDataset
 from dataclasses import (dataclass, field)
 from abc import ABC, abstractmethod
+from open3d.utility import Vector3dVector as vec3d
+from open3d.geometry import (
+    PointCloud, 
+    KDTreeSearchParamHybrid as kdtree_hyb
+)
 from ..types import *
 from ..scene.scene_objects import (PointCloudInfo, CameraInfo)
 
@@ -23,6 +28,7 @@ def register_dataset(name: str):
 @dataclass
 class BaseIterableDatasetConfig:
     source: str
+    type: Optional[str]=None
     target_size: Tuple[int, int]=None
     batch_size: Optional[int]=32
     device: Optional[str]="cpu"
@@ -35,6 +41,8 @@ class BaseIterableDatasetConfig:
     points_scale: Optional[float]=1.0
     normals_searching_rad: Optional[float]=0.1
     normals_searching_nns: Optional[int]=30
+    near: Optional[float]=0.1
+    far: Optional[float]=100.0
     
 
 @register_dataset("base")
@@ -42,8 +50,20 @@ class BaseIterableDataset(ABC, IterableDataset):
     
     def __init__(self, config) -> None:
         self.cfg = config
-        self.load_points3D()
-        self.load_cameras()
+
+    def preprocess_point_cloud(self, xyz: np.ndarray) -> np.ndarray:
+
+        pcd = PointCloud()
+        pcd.points = vec3d(xyz)
+        pcd.remove_radius_outlier(
+            self.cfg.outlier_knn_trashhold, 
+            self.cfg.outlier_radii_trashhold
+        )
+        pcd.estimate_normals(search_param=kdtree_hyb(
+            self.cfg.normals_searching_rad,
+            self.cfg.normals_searching_nns
+        ))
+        return np.asarray(pcd.points), np.asarray(pcd.normals)
     
     def build_splits(self, all_index: np.ndarray):
         if self.cfg.split_parts is not None:
@@ -84,75 +104,12 @@ class BaseIterableDataset(ABC, IterableDataset):
                     
 
     @abstractmethod
-    def load_cameras(self) -> Dict[int, Any]:
+    def collate(self) -> None:
         """
-        This functions collects all the information 
-        from dataset releated with cameras, intrinsics 
-        and extrinsics collections as well as rgb images
-
-        Returns
-        -------
-        Dict[str, Any]: The collection with all information 
-        neede to formulate sampling batch
-        """
-        raise NotImplementedError
-
-
-    @abstractmethod
-    def load_points3D(self) -> PointCloudInfo:
-        """
-        This functions loads points cloud data
-        from dataset, and calculate some geometrical
-        information like: normals, view-dependent angle maps
-        and e.t.c
-
-        Returns
-        -------
-        PointCloudInfo: the collection with all 
-        attributes listed in description
-        """
-        raise NotImplementedError
-    
-    @abstractmethod
-    def collate(self, batch) -> Dict[str, Any]:
-        """
-        This functions collects all
-        data from each dataset into 
-        reuslting batch for training 
+        Docstring for collate
         
-        :param self: 
-        :return: The colleciton of all data that needs for 
-                rasterization:
-                    [cameras]: CameraInfo object storage 
-                    [view_idx]: Stack of view indexes
-                    [images]: Tensor of gt images in (B, C, W, H) shape format 
-        :rtype: Dict[str, Any]
+        :param self: Description
         """
-    # def collate(self, batch) -> Dict[str, Any]:
-        
-    #     batch = {}
-    #     batch["images"] = []
-    #     batch["cameras"] = []
-    #     batch["view_idx"] = []
-    #     for _ in range(self.cfg.batch_size):
-            
-    #         idx = self.view_index_stack.pop()
-    #         if not self.view_index_stack:
-    #             self.view_index_stack = np.random.choice(
-    #                 self.viewpoints_pkg["view_index_stack"], 
-    #                 size=self.cfg.n_views
-    #             ).tolist()
-    #             idx = self.view_index_stack.pop()
-            
-    #         camera = self.viewpoints_pkg["cameras"][idx]
-    #         image = self.viewpoints_pkg["images"][idx]
-    #         batch["images"].append(image)
-    #         batch["cameras"].append(camera)
-    #         batch["view_idx"].append(idx)
-        
-    #     batch["images"] = torch.stack(batch["images"], dim=0)
-    #     batch["view_idx"] = torch.Tensor(batch["view_idx"])
-    #     return batch
 
 
     def __iter__(self):
